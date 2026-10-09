@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Sales Pace</title>
+<meta name="theme-color" content="#070B14">
+<script>
+  // Apply the saved theme and language before the page paints (no flash).
+  (function(){ try{
+    var t = localStorage.getItem('salesPace.theme'); if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+    var l = localStorage.getItem('salesPace.lang'); if (l === 'uz' || l === 'en') document.documentElement.setAttribute('lang', l);
+  }catch(e){} })();
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Plus+Jakarta+Sans:wght@600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="pace-ui.css?v=a53f448254">
+</head>
+<body>
+<div id="app" class="boot">Loading…</div>
+
+<script>
+  // Your Apps Script Web App URL (ends in /exec). This is the ONLY place it goes.
+  window.SALES_PACE_SCRIPT_URL = 'PASTE_YOUR_APPS_SCRIPT_WEB_APP_URL_HERE';
+</script>
+<script src="pace-lib.js?v=981842e4b9"></script>
+<script src="i18n.js?v=bebd119be1"></script>
+<script src="app.js?v=49ac10313b"></script>
+</body>
+</html>
