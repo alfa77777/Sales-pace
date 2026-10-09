@@ -1,0 +1,21 @@
+# Netlify settings for Sales Pace.
+# Needs one environment variable in Netlify: SALES_PACE_SCRIPT_URL (your Apps Script URL ending in /exec).
+
+[build]
+  publish = "site"
+  command = "node scripts/netlify-build.js"
+
+[build.environment]
+  NODE_VERSION = "20"
+
+# Always check for a fresh index.html so new deploys show up without a hard refresh.
+# Assets carry ?v=<hash>, so they can be cached.
+[[headers]]
+  for = "/*.html"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/"
+  [headers.values]
+    Cache-Control = "no-cache"
