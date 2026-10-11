@@ -1138,11 +1138,11 @@ function viewDashboard(){
   const todaySold = sumAmounts(stats.entries.filter(e => e.date === todayStr()));
   return head + pastBanner(m)
     + renderHero(t('Team plan'), plan, stats)
+    + renderDecadesCard(stats)
     + (isAdmin() && !isPast(m) ? renderActionCenter() : '')
     + renderStatTiles(stats, todaySold, true)
     + renderChartCard(stats, t('Team pace'), { reward: true })
     + (session ? renderSalesCallsCard(t('Team sales & call time'), stats.entries, data.calls, m) : '')
-    + renderDecadesCard(stats)
     + `<div class="grid-2">${renderLeaderboardCard(m)}${renderLatestSalesCard(stats.entries, m)}</div>`
     + renderClassMix(stats.entries, t('Sales by client class'));
 }
