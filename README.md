@@ -6,6 +6,7 @@ Sales tracking and payroll dashboard for the Englify sales team. Sellers log dai
 
 - **Team dashboard** — plan progress, daily pace needed, leaderboard, latest sales.
 - **Team reward milestones** — 25% of plan by day 10, 55% by day 20, 80% by month end.
+- **Team plan from selected sellers** — the team plan can be a typed number or the sum of the ticked sellers' plans; unticked sellers' sales show separately as "+ extra".
 - **Seller workspaces** — personal pace, forecast, daily target for each commission tier, and pay card.
 - **Payroll** — category-based commission tiers (C · Demo class, Other · G/O/A/B), fixed pay, team-leader bonus, mid-month hire proration.
 - **Call time & daily standards** — calendar view and compliance tracking.

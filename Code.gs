@@ -300,6 +300,58 @@ function validateTiers_(tiers, kind) {
   }
   return null;
 }
+/* ---------- team plan: typed number, or the sum of selected sellers ----------
+   cfg.teamMode = 'sum' → the team plan is the sum of cfg.teamSellers' plans for
+   that month (prorated for mid-month starters, like the app does). Sales by
+   sellers who are not selected show as "extra". Anything else = typed cfg.teamPlan. */
+function isSumMode_(cfg) { return !!cfg && cfg.teamMode === 'sum'; }
+function daysInMonth_(month) {
+  const p = month.split('-');
+  return new Date(Number(p[0]), Number(p[1]), 0).getDate();
+}
+/* Same rule as planForMonth() in pace-lib.js: plan ÷ days in month × days worked. */
+function proratedPlan_(plan, month, startDate) {
+  if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return plan;
+  const sm = startDate.slice(0, 7);
+  if (sm < month) return plan;
+  if (sm > month) return 0;
+  const startDay = Number(startDate.slice(8, 10));
+  if (startDay <= 1) return plan;
+  const dim = daysInMonth_(month);
+  return Math.round(plan * (dim - startDay + 1) / dim);
+}
+/* Same rule as sellerPayInfo() in pace-lib.js. */
+function sellerPlanIn_(cfg, name) {
+  const a = (cfg && cfg.sellers && cfg.sellers[name]) || { cat: '', plan: 0 };
+  if (Number(a.plan) > 0) return Number(a.plan);
+  const c = cfg && cfg.categories && cfg.categories[a.cat];
+  return c ? Number(c.plan) || 0 : 0;
+}
+function teamPlanIn_(cfg, month, startDates) {
+  if (!isSumMode_(cfg)) return Number(cfg && cfg.teamPlan) || 0;
+  return (cfg.teamSellers || []).reduce(function (sum, name) {
+    return sum + proratedPlan_(sellerPlanIn_(cfg, name), month, startDates[name] || '');
+  }, 0);
+}
+function readStartDates_() {
+  const out = {};
+  const sheet = ensureSellersSheet_();
+  if (sheet.getLastRow() < 2) return out;
+  sheet.getRange(2, 1, sheet.getLastRow() - 1, 7).getValues().forEach(function (row) {
+    if (row[0] === '') return;
+    const sd = row[6] === '' || row[6] == null ? '' : formatDate_(row[6]);
+    out[String(row[0])] = isValidDateStr_(sd) ? sd : '';
+  });
+  return out;
+}
+/* Keeps Config B1 equal to this month's team plan (handy when reading the sheet). */
+function syncConfigPlan_() {
+  const month = currentMonth_();
+  const rows = readPlanRows_();
+  const cfg = effectiveFrom_(rows, month) || legacyBase_();
+  ensureConfigSheet_().getRange('B1').setValue(teamPlanIn_(cfg, month, readStartDates_()));
+}
+
 /* A seller's category / own plan applies from this month on, including any
    later month that already has its own rules (planned ahead). */
 function setSellerAssignment_(name, cat, plan, session) {
@@ -429,8 +481,15 @@ function withIdempotency_(clientRequestId, fn) {
 
 /* ---------- GET: read everything ---------- */
 
+/* Guests see team plans only. In sum mode they also see WHO is in the plan
+   (names are already on the public leaderboard), never anyone's own plan:
+   the summed team plan comes precomputed per month in doGet's teamPlans. */
 function publicConfig_(cfg) {
-  return { teamPlan: Number(cfg.teamPlan) || 0, leaderPlan: 0, categories: {}, leader: { tiers: [] }, sellers: {} };
+  const sum = isSumMode_(cfg);
+  return {
+    teamPlan: Number(cfg.teamPlan) || 0, leaderPlan: 0, categories: {}, leader: { tiers: [] }, sellers: {},
+    teamMode: sum ? 'sum' : 'manual', teamSellers: sum ? (cfg.teamSellers || []).slice() : [],
+  };
 }
 
 function doGet(e) {
@@ -440,7 +499,7 @@ function doGet(e) {
   const planRows = readPlanRows_();
   const payBase = planRows.length ? null : legacyBase_();
   const current = effectiveFrom_(planRows, currentMonth_()) || payBase || payDefaults_();
-  const plan = Number(current.teamPlan) || 0;
+  const startDates = {};
 
   const sellers = [];
   const sellersSheet = ensureSellersSheet_();
@@ -449,10 +508,11 @@ function doGet(e) {
       if (row[0] === '') return;
       const a = (current.sellers || {})[String(row[0])] || { cat: '', plan: 0 };
       const s = { name: String(row[0]), hasLogin: !!row[2] };
+      const sd = row[6] === '' || row[6] == null ? '' : formatDate_(row[6]);
+      startDates[s.name] = isValidDateStr_(sd) ? sd : '';
       if (session) {
         s.target = Number(a.plan) || 0; s.category = a.cat || '';
-        const sd = row[6] === '' || row[6] == null ? '' : formatDate_(row[6]);
-        s.startDate = isValidDateStr_(sd) ? sd : '';
+        s.startDate = startDates[s.name];
       }
       if (isAdmin) s.username = String(row[2] || '');
       sellers.push(s);
@@ -512,8 +572,20 @@ function doGet(e) {
     }
   }
 
+  // Team plan per month where it is a sum of sellers' plans: from the first month
+  // with sales up to next month. Guests need it (they never see sellers' plans).
+  const teamPlans = {};
+  const cur = currentMonth_();
+  let first = cur;
+  entries.forEach(function (en) { const m = en.date.slice(0, 7); if (m < first) first = m; });
+  for (let m = first, n = 0; m <= nextMonth_(cur) && n < 120; m = nextMonth_(m), n++) {
+    const cfg = effectiveFrom_(planRows, m) || payBase;
+    if (isSumMode_(cfg)) teamPlans[m] = teamPlanIn_(cfg, m, startDates);
+  }
+
   return jsonOutput_({
-    plan: Number(plan) || 0,
+    plan: teamPlanIn_(current, cur, startDates),
+    teamPlans: teamPlans,
     sellers: sellers,
     entries: entries,
     standards: standards,
@@ -666,8 +738,12 @@ const ACTIONS = {
     const month = isValidMonth_(body.month) ? body.month : currentMonth_();
     if (month > nextMonth_(currentMonth_())) return fail_('You can plan at most one month ahead.');
     let oldVal = 0;
-    updateMonthConfig_(month, function (cfg) { oldVal = cfg.teamPlan || 0; cfg.teamPlan = Number(body.plan); });
-    if (month === currentMonth_()) ensureConfigSheet_().getRange('B1').setValue(Number(body.plan));
+    // A typed team plan means "manual": it replaces a sum-of-sellers plan for that month.
+    updateMonthConfig_(month, function (cfg) {
+      oldVal = cfg.teamPlan || 0; cfg.teamPlan = Number(body.plan);
+      if (isSumMode_(cfg)) cfg.teamMode = 'manual';
+    });
+    if (month === currentMonth_()) syncConfigPlan_();
     logAudit_('planChanged', 'Config', 'plan ' + month, oldVal, Number(body.plan), actor_(session));
     return jsonOutput_({ ok: true });
   },
@@ -677,8 +753,28 @@ const ACTIONS = {
     const month = isValidMonth_(body.month) ? body.month : null;
     if (!month) return fail_('Choose a month.');
     if (month > nextMonth_(currentMonth_())) return fail_('You can plan at most one month ahead.');
-    const team = body.teamPlan, leader = body.leaderPlan === '' || body.leaderPlan == null ? 0 : body.leaderPlan;
-    if (!isPositiveNumber_(team) || Number(team) > MAX_AMOUNT) return fail_('Team plan must be a number greater than 0.');
+    const leader = body.leaderPlan === '' || body.leaderPlan == null ? 0 : body.leaderPlan;
+    // teamMode missing = an older app version: keep the month's current mode and selection.
+    const hasMode = body.teamMode !== undefined && body.teamMode !== null;
+    if (hasMode && body.teamMode !== 'sum' && body.teamMode !== 'manual') return fail_('Choose how the team plan is set.');
+    const sumMode = hasMode && body.teamMode === 'sum';
+    let picked = null;
+    if (hasMode) {
+      if (body.teamSellers != null && !Array.isArray(body.teamSellers)) return fail_('Choose the sellers for the team plan.');
+      const roster = readStartDates_();
+      picked = [];
+      const list = body.teamSellers || [];
+      for (let i = 0; i < list.length; i++) {
+        const n = String(list[i]);
+        if (!Object.prototype.hasOwnProperty.call(roster, n)) return fail_('Unknown seller: ' + n + '.');
+        if (picked.indexOf(n) === -1) picked.push(n);
+      }
+      if (sumMode && !picked.length) return fail_('Select at least one seller for the team plan.');
+    }
+    // In sum mode the typed plan is optional (kept for switching back); 0 / empty keeps the old one.
+    let team = body.teamPlan;
+    if (sumMode && !(isPositiveNumber_(team) && Number(team) <= MAX_AMOUNT)) team = null;
+    else if (!isPositiveNumber_(team) || Number(team) > MAX_AMOUNT) return fail_('Team plan must be a number greater than 0.');
     if (!isNonNegativeNumber_(leader) || Number(leader) > MAX_AMOUNT) return fail_('Leader plan must be 0 or more.');
     const cats = body.categories || {};
     const clean = {};
@@ -694,14 +790,18 @@ const ACTIONS = {
     const lt = body.leader && Array.isArray(body.leader.tiers) ? body.leader.tiers.slice() : null;
     const lerr = validateTiers_(lt, 'leader');
     if (lerr) return fail_(lerr);
-    updateMonthConfig_(month, function (cfg) {
-      cfg.teamPlan = Number(team);
+    const saved = updateMonthConfig_(month, function (cfg) {
+      if (team !== null) cfg.teamPlan = Number(team);
       cfg.leaderPlan = Number(leader);
       cfg.categories = clean;
       cfg.leader = { tiers: lt };
+      if (hasMode) { cfg.teamMode = sumMode ? 'sum' : 'manual'; cfg.teamSellers = picked; }
     });
-    if (month === currentMonth_()) ensureConfigSheet_().getRange('B1').setValue(Number(team));
-    logAudit_('payPlanChanged', 'PlanConfig', month, '', 'team ' + Number(team) + ', C ' + clean.C.plan + ', OTHER ' + clean.OTHER.plan, actor_(session));
+    if (month === currentMonth_()) syncConfigPlan_();
+    const teamText = isSumMode_(saved)
+      ? 'team = sum of ' + saved.teamSellers.length + ' sellers (' + saved.teamSellers.join(', ') + ')'
+      : 'team ' + Number(saved.teamPlan);
+    logAudit_('payPlanChanged', 'PlanConfig', month, '', teamText + ', C ' + clean.C.plan + ', OTHER ' + clean.OTHER.plan, actor_(session));
     return jsonOutput_({ ok: true });
   },
 
@@ -861,11 +961,18 @@ const ACTIONS = {
     });
     const planSheet = ensurePlanConfigSheet_();
     readPlanRows_().forEach(function (r) {
+      let changed = false;
       if (r.config.sellers && Object.prototype.hasOwnProperty.call(r.config.sellers, oldName)) {
         r.config.sellers[newName] = r.config.sellers[oldName];
         delete r.config.sellers[oldName];
-        writePlanRow_(planSheet, r.row, r.month, r.config);
+        changed = true;
       }
+      const ts = Array.isArray(r.config.teamSellers) ? r.config.teamSellers : [];
+      if (ts.indexOf(oldName) !== -1) {
+        r.config.teamSellers = ts.map(function (n) { return n === oldName ? newName : n; });
+        changed = true;
+      }
+      if (changed) writePlanRow_(planSheet, r.row, r.month, r.config);
     });
     logAudit_('sellerRenamed', 'Seller', newName, oldName, newName + ' (' + moved + ' records updated)', actor_(session));
     return jsonOutput_({ ok: true, updated: moved });
@@ -906,6 +1013,22 @@ const ACTIONS = {
     const row = findRow_(sheet, 1, body.name);
     if (row === -1) return fail_('Seller not found.');
     sheet.deleteRow(row);
+    // Take them out of this month's (and planned months') team plan sum.
+    // Past months keep their plan as it was.
+    const month = currentMonth_();
+    const rows = readPlanRows_();
+    const inSum = function (cfg) { return isSumMode_(cfg) && (cfg.teamSellers || []).indexOf(body.name) !== -1; };
+    if (inSum(effectiveFrom_(rows, month))) {
+      updateMonthConfig_(month, function (cfg) { cfg.teamSellers = cfg.teamSellers.filter(function (n) { return n !== body.name; }); });
+    }
+    const planSheet = ensurePlanConfigSheet_();
+    readPlanRows_().forEach(function (r) {
+      if (r.month > month && inSum(r.config)) {
+        r.config.teamSellers = r.config.teamSellers.filter(function (n) { return n !== body.name; });
+        writePlanRow_(planSheet, r.row, r.month, r.config);
+      }
+    });
+    if (rows.length) syncConfigPlan_();
     logAudit_('sellerDeleted', 'Seller', body.name, 'removed from roster', '', actor_(session));
     return jsonOutput_({ ok: true });
   },

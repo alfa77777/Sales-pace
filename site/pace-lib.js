@@ -199,6 +199,15 @@ function sellerPayInfo(cfg, name){
   return { cat, plan, own, tiers: cat ? cfg.categories[cat].tiers : null };
 }
 
+/* Team plan as the sum of the selected sellers' plans for one month
+   (cfg.teamMode === 'sum'). Mid-month starters add their prorated plan.
+   Must match teamPlanIn_() in Code.gs. */
+function isSumPlan(cfg){ return !!cfg && cfg.teamMode === 'sum'; }
+function teamPlanSum(cfg, monthKey, startDateOf){
+  return (cfg.teamSellers || []).reduce((sum, name) =>
+    sum + planForMonth(sellerPayInfo(cfg, name).plan, monthKey, startDateOf(name) || '').plan, 0);
+}
+
 /* ---------- pay (salary) tiers ----------
    tiers: [{ from: 0, fix, pct }, { from: 40, ... }] sorted by "from" (% of plan).
    The tier is the last one whose "from" the seller has reached; its % applies

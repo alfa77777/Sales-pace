@@ -95,7 +95,7 @@ function trServer(msg){
 
 /* ---------- state ---------- */
 
-const data = { plan: 0, sellers: [], entries: [], standards: [], activity: [], calls: [], auditLog: [], adminExists: true, payConfigs: [], payBase: null };
+const data = { plan: 0, sellers: [], entries: [], standards: [], activity: [], calls: [], auditLog: [], adminExists: true, payConfigs: [], payBase: null, teamPlans: {} };
 let callIndex = new Map();
 let dataVersion = 0;
 let activityIndex = new Map();
@@ -209,8 +209,20 @@ function cfgFor(month){
   return effectivePayConfig(data.payConfigs, data.payBase, month)
     || { teamPlan: data.plan || 0, leaderPlan: 0, categories: {}, leader: { tiers: [] }, sellers: {} };
 }
-function teamPlanFor(month){ return Number(cfgFor(month).teamPlan) || 0; }
-function leaderPlanFor(month){ const c = cfgFor(month); return Number(c.leaderPlan) > 0 ? Number(c.leaderPlan) : (Number(c.teamPlan) || 0); }
+/* The team plan is either a typed number or (teamMode 'sum') the sum of the
+   selected sellers' plans. Guests can't see sellers' plans, so for them the
+   server sends the summed plan per month in data.teamPlans. */
+function sellerStartDate(name){ const s = sellerByName(name); return s ? s.startDate || '' : ''; }
+function teamPlanFor(month){
+  const c = cfgFor(month);
+  if (!isSumPlan(c)) return Number(c.teamPlan) || 0;
+  if (session) return teamPlanSum(c, month, sellerStartDate);
+  return Number((data.teamPlans || {})[month]) || 0;
+}
+/* Sellers whose plans make up the team plan, or null when it is a typed number. */
+function teamSellersFor(month){ const c = cfgFor(month); return isSumPlan(c) ? (c.teamSellers || []) : null; }
+function isExtraSeller(name, month){ const ts = teamSellersFor(month); return !!ts && ts.indexOf(name) === -1; }
+function leaderPlanFor(month){ const c = cfgFor(month); return Number(c.leaderPlan) > 0 ? Number(c.leaderPlan) : teamPlanFor(month); }
 /* A seller's category, tiers and plan for one month. plan is the FAIR plan:
    prorated by days worked when they started mid-month (fullPlan = whole month). */
 function sellerInfo(name, month){
@@ -388,6 +400,7 @@ function applyData(d){
   data.adminExists = d.adminExists !== false;
   data.payConfigs = (d.payConfigs || []).slice().sort((a, b) => (a.month < b.month ? -1 : a.month > b.month ? 1 : 0));
   data.payBase = d.payBase || null;
+  data.teamPlans = d.teamPlans && typeof d.teamPlans === 'object' ? d.teamPlans : {};
   activityIndex = new Map();
   data.activity.forEach(a => activityIndex.set(a.date + '\u0001' + a.seller + '\u0001' + a.standard, a));
   data.calls = (d.calls || []).map(c => ({ date: String(c.date), seller: String(c.seller), minutes: Number(c.minutes) || 0 }));
@@ -878,15 +891,17 @@ function sellerSelect(id, selected, cls, placeholder, extra){
 }
 function personCell(name, opts){
   opts = opts || {};
-  const inner = `<span class="avatar sm">${esc(initial(name))}</span><span>${esc(name)}</span>${opts.me ? ` <span class="pill role-seller">${esc(t('You'))}</span>` : ''}`;
+  const inner = `<span class="avatar sm">${esc(initial(name))}</span><span>${esc(name)}</span>${opts.me ? ` <span class="pill role-seller">${esc(t('You'))}</span>` : ''}${opts.tag || ''}`;
   if (isAdmin() && sellerByName(name)) return `<a class="person" href="${hrefFor('seller', { name, tab: opts.tab })}">${inner}</a>`;
   return `<span class="person">${inner}</span>`;
 }
 
-function renderTrack(pctComplete, label, marks){
+/* hitPct: what the milestone ticks are judged on (plan sellers only in sum mode). */
+function renderTrack(pctComplete, label, marks, hitPct){
   const pct = Math.min(Math.max(pctComplete, 0), 100);
+  const hp = hitPct == null ? pctComplete : hitPct;
   const ms = (marks || [25, 55, 80]).filter(m => m > 0 && m < 100).map(m =>
-    `<div class="checkpoint ${pctComplete >= m ? 'hit' : ''}" style="left:${m}%" data-label="${pctText(m)}"></div>`).join('');
+    `<div class="checkpoint ${hp >= m ? 'hit' : ''}" style="left:${m}%" data-label="${pctText(m)}"></div>`).join('');
   return `
     <div class="track" role="progressbar" aria-valuenow="${pctComplete.toFixed(1)}" aria-valuemin="0" aria-valuemax="100" aria-label="${esc(label)}">
       <div class="track-fill ${pctComplete >= 100 ? 'done' : ''}" style="width:${pct.toFixed(1)}%"></div>
@@ -894,7 +909,7 @@ function renderTrack(pctComplete, label, marks){
     </div>`;
 }
 
-function renderHero(label, amount, stats, marks, note){
+function renderHero(label, amount, stats, marks, note, extra){
   const info = stats.info;
   const m = info.monthKey;
   const daysText = stats.closed
@@ -920,7 +935,7 @@ function renderHero(label, amount, stats, marks, note){
         <div class="track-pct num">${stats.pctComplete.toFixed(stats.pctComplete < 10 ? 1 : 0)}%</div>
       </div>
       <div class="hero-foot">
-        <span>${esc(t('Sold'))} <strong class="num">${money(stats.totalSold)}</strong></span>
+        <span>${esc(t('Sold'))} <strong class="num">${money(stats.totalSold)}</strong>${extra && extra.amount > 0 ? ` <span class="pill extra-pill" title="${esc(extra.names.join(', ') + ' · ' + t('Total with extra: {v}', { v: money(extra.total) }))}">${esc(t('+{v} extra', { v: fmtShort(extra.amount) }))}</span>` : ''}</span>
         <span>${stats.remaining > 0 ? `${esc(t('Remaining'))} <strong class="num">${money(stats.remaining)}</strong>` : `<strong>${esc(t('Plan reached'))} 🎉</strong>`}</span>
       </div>
     </section>`;
@@ -1000,10 +1015,11 @@ function renderChartCard(stats, title, opts){
     </section>`;
 }
 
-function renderDecadesCard(stats){
+function renderDecadesCard(stats, planOnly){
   return `
     <section class="card slash" aria-label="${esc(t('Team reward milestones'))}">
       ${cardHead('target', esc(t('Team reward milestones')), `<span class="kicker">${esc(t('25% by day 10 · 55% by day 20 · 80% by month end'))}</span>`)}
+      ${planOnly ? `<p class="hint decade-note">${esc(t('Counts sales of plan sellers only. Extra sales are not included.'))}</p>` : ''}
       <div class="decade-grid">${stats.decades.map(renderDecadeCard).join('')}</div>
     </section>`;
 }
@@ -1134,17 +1150,29 @@ function viewDashboard(){
         <p>${isAdmin() ? `${esc(t('Set the team plan in'))} <a href="${hrefFor('settings')}" onclick="ui.settingsTab='pay'">${esc(t('Settings → Plans & pay'))}</a>.` : esc(t('The team leader hasn’t set this month’s plan yet.'))}</p>
       </section>` + (isAdmin() && !isPast(m) ? renderActionCenter() : '');
   }
-  const stats = computeStats(data.entries, plan, m);
+  // Sum mode: the team plan's progress (hero, milestones, tiles, charts) counts
+  // ONLY the selected sellers. Others' sales show as "+X extra" on top.
+  // Leaderboard, latest sales and class mix still list everyone.
+  const ts = teamSellersFor(m);
+  const inPlan = (e) => !ts || ts.indexOf(e.seller) !== -1;
+  const all = computeStats(data.entries, plan, m);
+  const stats = ts ? computeStats(data.entries.filter(inPlan), plan, m) : all;
   const todaySold = sumAmounts(stats.entries.filter(e => e.date === todayStr()));
+  let extra = null;
+  if (ts){
+    const extraEntries = all.entries.filter(e => !inPlan(e));
+    extra = { amount: sumAmounts(extraEntries), names: [...new Set(extraEntries.map(e => e.seller))], total: all.totalSold };
+  }
+  const calls = ts ? data.calls.filter(c => ts.indexOf(c.seller) !== -1) : data.calls;
   return head + pastBanner(m)
-    + renderHero(t('Team plan'), plan, stats)
-    + renderDecadesCard(stats)
+    + renderHero(t('Team plan'), plan, stats, null, ts ? cnt(ts.length, 'Sum of {n} seller', 'Sum of {n} sellers') : '', extra)
+    + renderDecadesCard(stats, !!ts)
     + (isAdmin() && !isPast(m) ? renderActionCenter() : '')
     + renderStatTiles(stats, todaySold, true)
     + renderChartCard(stats, t('Team pace'), { reward: true })
-    + (session ? renderSalesCallsCard(t('Team sales & call time'), stats.entries, data.calls, m) : '')
-    + `<div class="grid-2">${renderLeaderboardCard(m)}${renderLatestSalesCard(stats.entries, m)}</div>`
-    + renderClassMix(stats.entries, t('Sales by client class'));
+    + (session ? renderSalesCallsCard(t(ts ? 'Plan sellers: sales & call time' : 'Team sales & call time'), stats.entries, calls, m) : '')
+    + `<div class="grid-2">${renderLeaderboardCard(m)}${renderLatestSalesCard(all.entries, m)}</div>`
+    + renderClassMix(all.entries, t('Sales by client class'));
 }
 
 function renderLeaderCard(m){
@@ -1174,6 +1202,9 @@ function renderLeaderCard(m){
     </section>`;
 }
 
+function extraTag(name, m){
+  return isExtraSeller(name, m) ? ` <span class="pill extra-pill" title="${esc(t('Not in the team plan: their sales count as extra'))}">${esc(t('Extra'))}</span>` : '';
+}
 function renderLeaderboardCard(m){
   const board = monthLeaderboard(m);
   const showPlan = !!session;
@@ -1182,7 +1213,7 @@ function renderLeaderboardCard(m){
     return `
       <tr class="${me ? 'is-me' : ''}">
         <td class="rank-cell">${medal(l)}</td>
-        <td>${personCell(l.name, { me })}</td>
+        <td>${personCell(l.name, { me, tag: extraTag(l.name, m) })}</td>
         <td class="amt-cell num">${fmt(l.amount)}</td>
         ${showPlan ? `<td class="hide-sm">${pctCell(l.amount, sellerInfo(l.name, m).plan)}</td>` : ''}
       </tr>`;
@@ -1234,7 +1265,7 @@ function viewLeaderboard(){
     return `
       <tr class="${me ? 'is-me' : ''}">
         <td class="rank-cell">${medal(l)}</td>
-        <td>${personCell(l.name, { me })}</td>
+        <td>${personCell(l.name, { me, tag: extraTag(l.name, m) })}</td>
         <td class="amt-cell num">${fmt(l.amount)}</td>
         ${past ? '' : `<td class="num hide-sm">${todayBy[l.name] ? fmt(todayBy[l.name]) : '<span class="muted">—</span>'}</td>`}
         ${showPlan ? `<td class="num hide-sm">${plan > 0 ? fmt(plan) : '<span class="muted">—</span>'}</td>
@@ -2190,6 +2221,9 @@ function draftFor(month){
   ui.payDraft = {
     month,
     teamPlan: Number(c.teamPlan) || 0,
+    teamMode: isSumPlan(c) ? 'sum' : 'manual',
+    teamSellers: (c.teamSellers || []).filter(n => !!sellerByName(n)),
+    sellersCfg: c.sellers || {},
     leaderPlan: Number(c.leaderPlan) || 0,
     categories: { C: (c.categories && c.categories.C) || def.C, OTHER: (c.categories && c.categories.OTHER) || def.OTHER },
     leader: { tiers: ((c.leader && c.leader.tiers) || [{ from: 0, pct: 0, bonus: 0 }]).map(x => Object.assign({}, x)) },
@@ -2202,8 +2236,11 @@ function decIn(id){ const v = val(id).replace(',', '.').trim(); return v === '' 
 /* Copies what is typed in the editor back into the draft (before add/remove/save). */
 function syncPayDraft(){
   const d = ui.payDraft;
-  if (!d || !document.getElementById('pc-team')) return;
-  d.teamPlan = numIn('pc-team');
+  if (!d || !document.getElementById('pc-leader')) return;
+  const modeEl = document.querySelector('input[name="pc-mode"]:checked');
+  if (modeEl) d.teamMode = modeEl.value;
+  if (document.getElementById('pc-team')) d.teamPlan = numIn('pc-team');
+  if (document.getElementById('pc-sellers')) d.teamSellers = [...document.querySelectorAll('#pc-sellers input[type=checkbox]:checked')].map(x => x.value);
   d.leaderPlan = val('pc-leader').trim() === '' ? 0 : numIn('pc-leader');
   CATS.forEach(k => {
     const c = d.categories[k];
@@ -2211,6 +2248,39 @@ function syncPayDraft(){
     c.tiers = c.tiers.map((x, i) => ({ from: decIn(`pc-${k}-from-${i}`), fix: numIn(`pc-${k}-fix-${i}`), pct: decIn(`pc-${k}-pct-${i}`) }));
   });
   d.leader.tiers = d.leader.tiers.map((x, i) => ({ from: decIn(`pc-L-from-${i}`), pct: decIn(`pc-L-pct-${i}`), bonus: numIn(`pc-L-bonus-${i}`) }));
+}
+/* Each seller's plan for the edited month, using the category plans typed in the draft. */
+function draftSellerPlan(d, name){
+  const base = sellerPayInfo({ sellers: d.sellersCfg, categories: d.categories }, name);
+  return planForMonth(base.plan, d.month, sellerStartDate(name));
+}
+function draftTeamSum(d){ return d.teamSellers.reduce((s, n) => s + draftSellerPlan(d, n).plan, 0); }
+function payTeamChanged(){ syncPayDraft(); delete errors.pay; render({ fresh: true }); }
+function teamPlanFields(d){
+  const radio = (v, label) => `<label class="check mode-opt"><input type="radio" name="pc-mode" value="${v}" ${d.teamMode === v ? 'checked' : ''} onchange="payTeamChanged()"><span>${esc(label)}</span></label>`;
+  const modeRow = `<div class="field"><span class="field-label">${esc(t('Team plan is'))}</span><div class="mode-row" role="radiogroup" aria-label="${esc(t('Team plan is'))}">${radio('manual', t('A number I type'))}${radio('sum', t('Sum of selected sellers'))}</div></div>`;
+  if (d.teamMode !== 'sum'){
+    return modeRow + `<div class="field"><label for="pc-team">${esc(t("Team plan (so'm)"))}</label><input type="text" inputmode="numeric" id="pc-team" class="amount-input" value="${d.teamPlan ? fmt(d.teamPlan) : ''}" oninput="formatThousandsLive(this)"></div>`;
+  }
+  const names = sellerNames();
+  const rows = names.length ? names.map(n => {
+    const on = d.teamSellers.indexOf(n) !== -1;
+    const pf = draftSellerPlan(d, n);
+    const note = pf.notStarted ? t('Starts later') : pf.prorated ? t('{n} of {m} days', { n: pf.days, m: pf.dim }) : '';
+    return `<label class="team-pick ${on ? 'on' : ''}">
+      <input type="checkbox" value="${esc(n)}" ${on ? 'checked' : ''} onchange="payTeamChanged()">
+      <span class="tp-name">${esc(n)}</span>
+      <span class="tp-plan num">${pf.plan > 0 ? fmt(pf.plan) : `<span class="muted">${esc(t('No plan'))}</span>`}${note ? ` <span class="muted small">· ${esc(note)}</span>` : ''}</span>
+      <span class="pill ${on ? 'ok' : 'extra-pill'}">${esc(on ? t('In plan') : t('Extra'))}</span>
+    </label>`;
+  }).join('') : `<p class="empty">${esc(t('No sellers yet.'))}</p>`;
+  return modeRow + `
+    <div class="field team-sum-field">
+      <span class="field-label">${esc(t('Sellers in the team plan'))}</span>
+      <div id="pc-sellers" class="team-picks">${rows}</div>
+      <div class="team-sum"><span>${esc(t('Team plan = sum of {n} sellers', { n: d.teamSellers.length }))}</span><strong class="num">${money(draftTeamSum(d))}</strong></div>
+      <p class="hint">${esc(t('Only ticked sellers’ sales count toward the team plan and its 10-day reward milestones. Unticked sellers are extra: their sales show separately as “+ extra”. Plans follow each seller’s category, own plan and start date.'))}</p>
+    </div>`;
 }
 function addTier(kind){
   syncPayDraft();
@@ -2270,9 +2340,9 @@ function payEditor(){
       ${errorHtml('pay')}
       <div class="form-grid">
         <div class="field"><label for="pc-month">${esc(t('Rules for'))}</label><select id="pc-month" data-fixed onchange="setPayMonth(this.value)">${months.map(k => `<option value="${k}" ${k === month ? 'selected' : ''}>${esc(monthLabel(k))}${k === cur ? ' · ' + esc(t('this month')) : (k > cur ? ' · ' + esc(t('next month')) : '')}</option>`).join('')}</select></div>
-        <div class="field"><label for="pc-team">${esc(t("Team plan (so'm)"))}</label><input type="text" inputmode="numeric" id="pc-team" class="amount-input" value="${d.teamPlan ? fmt(d.teamPlan) : ''}" oninput="formatThousandsLive(this)"></div>
         <div class="field"><label for="pc-leader">${esc(t("Leader plan (so'm)"))}</label><input type="text" inputmode="numeric" id="pc-leader" class="amount-input" value="${d.leaderPlan ? fmt(d.leaderPlan) : ''}" placeholder="${esc(t('Empty = same as team plan'))}" oninput="formatThousandsLive(this)"></div>
       </div>
+      <div class="team-plan-box">${teamPlanFields(d)}</div>
       <p class="hint">${esc(t('The team plan drives the dashboard and the 25 / 55 / 80% reward milestones. The leader plan drives the team leader bonus.'))}</p>
     </section>
     ${catCard('C', t('C · Demo class — clients who used the demo app'))}
@@ -2303,7 +2373,9 @@ async function savePayRules(){
   syncPayDraft();
   const d = ui.payDraft;
   if (!d) return;
-  if (!(d.teamPlan > 0)) return fail('pay', t('Team plan must be a number greater than 0.'));
+  if (d.teamMode === 'sum'){
+    if (!d.teamSellers.length) return fail('pay', t('Select at least one seller for the team plan.'));
+  } else if (!(d.teamPlan > 0)) return fail('pay', t('Team plan must be a number greater than 0.'));
   for (const k of CATS){
     if (!(d.categories[k].plan > 0)) return fail('pay', t('Each category plan must be a number greater than 0.'));
     const e = checkTiers(d.categories[k].tiers, false);
@@ -2312,7 +2384,7 @@ async function savePayRules(){
   const le = checkTiers(d.leader.tiers, true);
   if (le) return fail('pay', t('Team leader bonus') + ': ' + le);
   const month = d.month;
-  await runAction({ action: 'savePayConfig', month, teamPlan: d.teamPlan, leaderPlan: d.leaderPlan, categories: d.categories, leader: d.leader },
+  await runAction({ action: 'savePayConfig', month, teamMode: d.teamMode, teamSellers: d.teamSellers, teamPlan: d.teamPlan > 0 ? d.teamPlan : 0, leaderPlan: d.leaderPlan, categories: d.categories, leader: d.leader },
     t('Pay rules saved for {month}.', { month: monthLabel(month) }), {
       formKey: 'pay', pendingKey: 'pay',
       afterLoad: () => { ui.payDraft = null; },

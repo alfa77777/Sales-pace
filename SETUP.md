@@ -72,6 +72,7 @@ Old personal targets are **not** used anymore. Plans now come from each seller's
 5. Click each seller in the sidebar. Choose **C** or **Other** under **Set category**.
 6. For a seller with a different plan, open **Account** and type an **Own plan**.
 7. For a seller who started this month, set their **Start date** in **Account**. Their plan for that month is prorated by days; their fixed pay is not.
+8. Optional: under **Team plan is**, choose **Sum of selected sellers** and tick the sellers whose plans make the team plan. Only ticked sellers' sales count toward the team plan, its % and the 10-day reward milestones. Unticked sellers show as **Extra**: their sales appear separately as "+X extra". The team leader bonus still counts all sales.
 
 ## 8. Check it works
 
