@@ -80,6 +80,8 @@ function trServer(msg){
   let m;
   if ((m = msg.match(/^(New p|P)assword must be at least (\d+) characters\.$/))) return t(m[1] === 'P' ? 'Password must be at least {n} characters.' : 'New password must be at least {n} characters.', { n: m[2] });
   if ((m = msg.match(/^Unknown seller: (.*)\.$/))) return t('Unknown seller: {name}.', { name: m[1] });
+  if ((m = msg.match(/^(.*) has sales up to (\d{4}-\d{2}-\d{2})\. Choose that day or later, or move those sales first\.$/))) return t('{name} has sales up to {d}. Choose that day or later, or move those sales first.', { name: m[1], d: m[2] });
+  if ((m = msg.match(/^(.*) was deactivated after (\d{4}-\d{2}-\d{2})\. Sales after that day can’t be added\.$/))) return t('{name} was deactivated after {d}. Sales after that day can’t be added.', { name: m[1], d: m[2] });
   if ((m = msg.match(/^(.*) appears twice\. Combine the amounts into one row\.$/))) return t('{name} appears twice. Combine the amounts into one row.', { name: m[1] });
   if ((m = msg.match(/^Too many rows in one save \(max (\d+)\)\.$/))) return t('Too many rows in one save (max {n}).', { n: m[1] });
   if ((m = msg.match(/^A pay table can have at most (\d+) rows\.$/))) return t('A pay table can have at most {n} rows.', { n: m[1] });
@@ -164,6 +166,13 @@ function money(n){ return fmt(n) + " so'm"; }
 function pctText(p){ return (Math.round(p * 10) / 10).toString().replace(/\.0$/, '') + '%'; }
 function sellerByName(name){ return data.sellers.find(s => s.name === name) || null; }
 function sellerNames(){ return data.sellers.map(s => s.name); }
+/* Deactivated sellers keep their history (sales, pay up to the last working
+   day) but drop out of every list for later months and of daily work. */
+function isDeactivated(s){ return !!(s && (s.endDate || s.endMonth)); }
+function sellerEndMonth(s){ return s ? (s.endMonth || (s.endDate ? s.endDate.slice(0, 7) : '')) : ''; }
+function activeSellers(){ return data.sellers.filter(s => !isDeactivated(s)); }
+function rosterFor(month){ return data.sellers.filter(s => !isDeactivated(s) || sellerEndMonth(s) >= month); }
+function activeOn(s, date){ return !isDeactivated(s) || (s.endDate ? s.endDate >= date : sellerEndMonth(s) >= date.slice(0, 7)); }
 function sumAmounts(list){ return list.reduce((s, e) => s + e.amount, 0); }
 function parseYmd(s){ const p = String(s).split('-').map(Number); return new Date(p[0], p[1] - 1, p[2]); }
 function ymdOf(d){ return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
@@ -213,10 +222,26 @@ function cfgFor(month){
    selected sellers' plans. Guests can't see sellers' plans, so for them the
    server sends the summed plan per month in data.teamPlans. */
 function sellerStartDate(name){ const s = sellerByName(name); return s ? s.startDate || '' : ''; }
+/* Weekly rest day (0 = Sunday … 6 = Saturday) or null. */
+function sellerRestDow(name){ const s = sellerByName(name); return s && s.restDay != null ? s.restDay : null; }
+function isSellerRestDate(name, date){ return isRestDate(date, sellerRestDow(name)); }
+const WEEKDAYS_EN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+function weekdayName(dow){ return t(WEEKDAYS_EN[dow]); }
+/* Days from `from` (exclusive) to `to` (inclusive) that are working days. */
+function workDaysSince(from, to, restDow){
+  let n = 0;
+  for (let d = addDaysStr(from, 1); d <= to; d = addDaysStr(d, 1)) if (!isRestDate(d, restDow)) n++;
+  return n;
+}
+function restDaySelect(id, selected){
+  const order = [1, 2, 3, 4, 5, 6, 0]; // Monday first
+  return `<select id="${id}"><option value="" ${selected == null ? 'selected' : ''}>${esc(t('No rest day'))}</option>${order.map(d => `<option value="${d}" ${selected === d ? 'selected' : ''}>${esc(weekdayName(d))}</option>`).join('')}</select>`;
+}
+function sellerEndDate(name){ const s = sellerByName(name); return s ? s.endDate || '' : ''; }
 function teamPlanFor(month){
   const c = cfgFor(month);
   if (!isSumPlan(c)) return Number(c.teamPlan) || 0;
-  if (session) return teamPlanSum(c, month, sellerStartDate);
+  if (session) return teamPlanSum(c, month, sellerStartDate, sellerEndDate);
   return Number((data.teamPlans || {})[month]) || 0;
 }
 /* Sellers whose plans make up the team plan, or null when it is a typed number. */
@@ -228,16 +253,22 @@ function leaderPlanFor(month){ const c = cfgFor(month); return Number(c.leaderPl
 function sellerInfo(name, month){
   const base = sellerPayInfo(cfgFor(month), name);
   const s = sellerByName(name);
-  const pf = planForMonth(base.plan, month, s ? s.startDate : '');
-  return Object.assign({}, base, { fullPlan: base.plan, plan: pf.plan, pf, _start: s ? s.startDate : '' });
+  const pf = planForMonth(base.plan, month, s ? s.startDate : '', s ? s.endDate : '');
+  return Object.assign({}, base, { fullPlan: base.plan, plan: pf.plan, pf, _start: s ? s.startDate : '', restDow: s ? s.restDay : null });
 }
 function sellerStats(name, month){
   const info = sellerInfo(name, month);
-  return computeStats(data.entries.filter(e => e.seller === name), info.plan, month, { startDay: info.pf.startDay });
+  return computeStats(data.entries.filter(e => e.seller === name), info.plan, month, { startDay: info.pf.startDay, restDow: info.restDow });
 }
 function startNote(info, month){
   if (!info.pf) return '';
   if (info.pf.notStarted) return t('Starts on {d}', { d: shortDay(sellerStartOf(info)) });
+  if (info.pf.ended) return t('Deactivated');
+  if (info.pf.prorated && info.pf.endDay < info.pf.dim){
+    return info.pf.startDay > 1
+      ? t('{a}–{b}: {n} of {m} days', { a: shortDay(month + '-' + pad(info.pf.startDay)), b: shortDay(month + '-' + pad(info.pf.endDay)), n: info.pf.days, m: info.pf.dim })
+      : t('Until {d}: {n} of {m} days', { d: shortDay(month + '-' + pad(info.pf.endDay)), n: info.pf.days, m: info.pf.dim });
+  }
   if (info.pf.prorated) return t('From {d}: {n} of {m} days', { d: shortDay(month + '-' + pad(info.pf.startDay)), n: info.pf.days, m: info.pf.dim });
   return '';
 }
@@ -303,6 +334,7 @@ const ICONS = {
   shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
   trash: '<path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/>',
   target: '<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>',
+  pause: '<circle cx="12" cy="12" r="10"/><path d="M10 9v6M14 9v6"/>',
   refresh: '<path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
   wallet: '<path d="M20 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-4a2 2 0 0 0 0 4h4v4a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5"/><path d="M17 14h.01"/>',
   crown: '<path d="M2 18h20"/><path d="m3 7 5 5 4-7 4 7 5-5-2 11H5z"/>',
@@ -390,7 +422,7 @@ async function apiPost(payload, requestId){
 
 function applyData(d){
   data.plan = Number(d.plan) || 0;
-  data.sellers = (d.sellers || []).map(s => ({ name: String(s.name), hasLogin: !!s.hasLogin, username: s.username || '', startDate: isDateStr(s.startDate || '') ? s.startDate : '' }));
+  data.sellers = (d.sellers || []).map(s => ({ name: String(s.name), hasLogin: !!s.hasLogin, username: s.username || '', startDate: isDateStr(s.startDate || '') ? s.startDate : '', endDate: isDateStr(s.endDate || '') ? s.endDate : '', endMonth: /^\d{4}-\d{2}$/.test(s.endMonth || '') ? s.endMonth : '', restDay: validRestDow(s.restDay) }));
   data.entries = (d.entries || []).map(e => ({
     id: String(e.id), date: String(e.date), seller: String(e.seller || ''), amount: Number(e.amount) || 0, cls: CLASSES.indexOf(e.cls) !== -1 ? e.cls : '',
   }));
@@ -748,12 +780,12 @@ function renderSidebar(){
     return `<a class="nav-item ${active ? 'active' : ''}" href="${hrefFor(r)}" ${active ? 'aria-current="page"' : ''}>${icon(ROUTES[r].icon)}<span>${esc(t(ROUTES[r].label))}</span></a>`;
   }).join('');
   let workspaces = '';
-  if (isAdmin() && loaded && data.sellers.length){
+  if (isAdmin() && loaded && activeSellers().length){
     const risks = teamRisks();
     workspaces = `
       <div class="nav-label">${esc(t('Seller workspaces'))}</div>
       <nav class="seller-nav" aria-label="${esc(t('Seller workspaces'))}">
-        ${data.sellers.map(s => {
+        ${activeSellers().map(s => {
           const r = risks[s.name].risk;
           const active = route.name === 'seller' && route.params.name === s.name;
           return `<a class="seller-link ${active ? 'active' : ''}" href="${hrefFor('seller', { name: s.name })}" ${active ? 'aria-current="page"' : ''} title="${esc(r ? r.label : t('No plan'))}">
@@ -886,7 +918,7 @@ function paceTone(status){ return { good: 'ok', warn: 'needsattention', bad: 'cr
 function sellerSelect(id, selected, cls, placeholder, extra){
   return `<select id="${id}" class="${cls || ''}" ${extra || ''}>
     ${placeholder ? `<option value="">${esc(placeholder)}</option>` : ''}
-    ${data.sellers.map(s => `<option value="${esc(s.name)}" ${s.name === selected ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
+    ${data.sellers.filter(s => !isDeactivated(s) || s.name === selected).map(s => `<option value="${esc(s.name)}" ${s.name === selected ? 'selected' : ''}>${esc(s.name)}${isDeactivated(s) ? ' · ' + esc(t('Deactivated')) : ''}</option>`).join('')}
   </select>`;
 }
 function personCell(name, opts){
@@ -914,7 +946,8 @@ function renderHero(label, amount, stats, marks, note, extra){
   const m = info.monthKey;
   const daysText = stats.closed
     ? esc(t('Month closed'))
-    : esc(t('Day {d} of {n}', { d: info.dayOfMonth, n: info.daysInMonth })) + ' · ' + esc(cnt(stats.daysLeft, '{n} day left', '{n} days left'));
+    : esc(t('Day {d} of {n}', { d: info.dayOfMonth, n: info.daysInMonth })) + ' · ' + esc(stats.restDow != null ? cnt(stats.daysLeft, '{n} working day left', '{n} working days left') : cnt(stats.daysLeft, '{n} day left', '{n} days left'))
+      + (stats.restToday ? ' · ' + esc(t('Rest day today')) : '');
   return `
     <section class="card slash hero" aria-label="${esc(label)}">
       <div class="hero-top">
@@ -954,7 +987,7 @@ function renderStatTiles(stats, todaySold, isTeam){
         <div class="stat-tile">
           <div class="stat-label">${esc(t('Average per day'))}</div>
           <div class="stat-value num">${fmt(stats.recentAvgDaily)}</div>
-          <div class="stat-sub">${esc(t('over {n} days', { n: stats.info.daysInMonth }))}</div>
+          <div class="stat-sub">${esc(stats.restDow != null ? t('over {n} working days', { n: stats.recentDays }) : t('over {n} days', { n: stats.info.daysInMonth }))}</div>
         </div>
         <div class="stat-tile">
           <div class="stat-label">${esc(t('Best day'))}</div>
@@ -971,7 +1004,7 @@ function renderStatTiles(stats, todaySold, isTeam){
   const done = stats.remaining <= 0;
   const need = stats.dailyTarget;
   const todayGood = done || (need > 0 && todaySold >= need);
-  const todaySub = done ? t('Plan already reached') : (need > 0 ? t('{p}% of today’s {need} need', { p: Math.round(todaySold / need * 100), need: fmtShort(need) }) : '—');
+  const todaySub = done ? t('Plan already reached') : stats.restToday ? t('Rest day: no target today') : (need > 0 ? t('{p}% of today’s {need} need', { p: Math.round(todaySold / need * 100), need: fmtShort(need) }) : '—');
   const avgSub = done ? t("so'm/day recent pace") : t("so'm/day · {p}% of what’s needed", { p: Math.round(stats.paceRatio * 100) });
   return `
     <section class="stat-grid" aria-label="${esc(t('Key numbers'))}">
@@ -983,10 +1016,10 @@ function renderStatTiles(stats, todaySold, isTeam){
       <div class="stat-tile status-${done ? 'good' : stats.neededStatus}">
         <div class="stat-label">${esc(t('Needed per day'))}</div>
         <div class="stat-value num">${done ? '🎉' : fmt(need)}</div>
-        <div class="stat-sub">${esc(done ? t('Plan complete') : t("so'm/day to reach 100% of the plan"))}</div>
+        <div class="stat-sub">${esc(done ? t('Plan complete') : (stats.restDow != null ? t("so'm per working day to reach 100% of the plan") : t("so'm/day to reach 100% of the plan")))}</div>
       </div>
       <div class="stat-tile">
-        <div class="stat-label">${esc(t('{n}-day average', { n: stats.recentDays }))}</div>
+        <div class="stat-label">${esc(stats.restDow != null ? (stats.recentDays > 0 ? t('{n}-working-day average', { n: stats.recentDays }) : t('Recent average')) : t('{n}-day average', { n: stats.recentDays }))}</div>
         <div class="stat-value num">${fmt(stats.recentAvgDaily)}</div>
         <div class="stat-sub">${esc(avgSub)}</div>
       </div>
@@ -1025,7 +1058,7 @@ function renderDecadesCard(stats, planOnly){
 }
 
 function monthLeaderboard(month){
-  const board = computeLeaderboard(monthEntries(data.entries, month), sellerNames());
+  const board = computeLeaderboard(monthEntries(data.entries, month), rosterFor(month).map(s => s.name));
   let prev = null, rank = 0;
   return board.map((x, i) => {
     if (prev === null || x.amount !== prev){ rank = i + 1; prev = x.amount; }
@@ -1071,15 +1104,17 @@ function teamRisks(){
   data.sellers.forEach(s => {
     const mine = data.entries.filter(e => e.seller === s.name);
     const info = sellerInfo(s.name, month);
-    const stats = computeStats(mine, info.plan, month, { startDay: info.pf.startDay });
+    const stats = computeStats(mine, info.plan, month, { startDay: info.pf.startDay, restDow: info.restDow });
     const todaySold = sumAmounts(mine.filter(e => e.date === today));
     const last = lastSaleDate(mine);
-    const compliantToday = data.standards.length
+    const restToday = isRestDate(today, info.restDow);
+    // Rest day: no standards expected, and rest days don't count as "days without a sale".
+    const compliantToday = data.standards.length && !restToday
       ? data.standards.every(std => { const r = findActivity(today, s.name, std.name); return !!r && r.value >= std.minPerDay; })
       : null;
-    const daysSinceLastSale = last ? daysBetween(last < s.startDate ? s.startDate : last, today) : (s.startDate && s.startDate <= today ? daysBetween(s.startDate, today) : null);
-    const risk = info.plan > 0 && stats.started ? classifyRisk(stats, { daysSinceLastSale, compliantToday }) : null;
-    map[s.name] = { seller: s, info, stats, todaySold, last, compliantToday, risk };
+    const daysSinceLastSale = last ? workDaysSince(last < s.startDate ? s.startDate : last, today, info.restDow) : (s.startDate && s.startDate <= today ? workDaysSince(s.startDate, today, info.restDow) : null);
+    const risk = !isDeactivated(s) && info.plan > 0 && stats.started ? classifyRisk(stats, { daysSinceLastSale, compliantToday }) : null;
+    map[s.name] = { seller: s, info, stats, todaySold, last, compliantToday, risk, restToday };
   });
   riskMemo = { v: dataVersion, today, map, lang };
   return map;
@@ -1088,7 +1123,7 @@ const RISK_LEVELS = [['critical', 'Critical', 'alert'], ['atrisk', 'At risk', 't
 function toggleRiskList(level){ ui.openRiskLevel = ui.openRiskLevel === level ? null : level; render(); }
 function renderActionCenter(){
   const map = teamRisks();
-  const snaps = data.sellers.map(s => map[s.name]);
+  const snaps = activeSellers().map(s => map[s.name]);
   const withPlan = snaps.filter(x => x.risk);
   const noPlan = snaps.filter(x => !x.risk);
   if (!withPlan.length){
@@ -1425,7 +1460,12 @@ function renderRankCard(name, m){
 
 function renderWeekStrip(name, fullPlan, dim){
   const today = todayStr();
-  const baseline = fullPlan > 0 ? fullPlan / (dim || getMonthInfo(new Date()).daysInMonth) : 0;
+  const rest = sellerRestDow(name);
+  const mk = today.slice(0, 7);
+  const dimNow = dim || getMonthInfo(new Date()).daysInMonth;
+  // Daily baseline over WORKING days when the seller has a weekly rest day.
+  const baseDays = rest != null ? workDaysBetween(mk, 1, dimNow, rest) : dimNow;
+  const baseline = fullPlan > 0 ? fullPlan / baseDays : 0;
   const days = [];
   for (let i = 6; i >= 0; i--) days.push(addDaysStr(today, -i));
   const byDay = {};
@@ -1433,16 +1473,18 @@ function renderWeekStrip(name, fullPlan, dim){
   const chips = days.map(d => {
     const amt = byDay[d] || 0;
     let cls = '';
+    const isRest = isRestDate(d, rest);
     if (amt > 0 && (baseline === 0 || amt >= baseline)) cls = 'ok';
+    else if (isRest) cls = 'rest';
     else if (d < today) cls = 'short';
     const mln = (Math.round(amt / 1e5) / 10).toString();
-    return `<button type="button" class="day-chip ${cls}" onclick="openCalendar(${jsArg(name)}, '${d}')" title="${esc(dayLabel(d))}: ${esc(money(amt))}">${esc(weekday(d))} ${parseYmd(d).getDate()}<b class="num">${amt ? mln : '0'}</b></button>`;
+    return `<button type="button" class="day-chip ${cls}" onclick="openCalendar(${jsArg(name)}, '${d}')" title="${esc(dayLabel(d))}: ${esc(money(amt))}${isRest ? ' · ' + esc(t('Rest day')) : ''}">${esc(weekday(d))} ${parseYmd(d).getDate()}<b class="num">${amt ? mln : (isRest ? esc(t('rest')) : '0')}</b></button>`;
   }).join('');
   return `
     <section class="card week-card" aria-label="${esc(t('Last 7 days'))}">
       ${cardHead('calendar', esc(t('Last 7 days')), `<button type="button" class="view-all" onclick="openCalendar(${jsArg(name)}, '${today}')">${esc(t('Full calendar'))} →</button>`)}
       <div class="week-strip">${chips}</div>
-      <p class="hint">${esc(t("in mln so'm"))}${baseline ? ' · ' + esc(t('Green = at or above {n}/day (plan ÷ days in month)', { n: fmtShort(baseline) })) : ''} · ${esc(t('Tap a day for details'))}</p>
+      <p class="hint">${esc(t("in mln so'm"))}${baseline ? ' · ' + esc(rest != null ? t('Green = at or above {n}/day (plan ÷ working days in month)', { n: fmtShort(baseline) }) : t('Green = at or above {n}/day (plan ÷ days in month)', { n: fmtShort(baseline) })) : ''} · ${esc(t('Tap a day for details'))}</p>
     </section>`;
 }
 
@@ -1499,7 +1541,7 @@ function renderSellerSales(name, asAdmin){
   const past = isPast(m);
   const info = sellerInfo(name, m);
   const mine = data.entries.filter(e => e.seller === name);
-  const stats = computeStats(mine, info.plan, m, { startDay: info.pf.startDay });
+  const stats = computeStats(mine, info.plan, m, { startDay: info.pf.startDay, restDow: info.restDow });
   const todaySold = sumAmounts(mine.filter(e => e.date === todayStr()));
   const quick = past ? '' : `
     <div class="quick-actions">
@@ -1562,7 +1604,7 @@ function renderTierNeeds(info, stats, m){
   }).join('');
   return `
     <section class="card slash" aria-label="${esc(t('Daily sales needed for each pay tier'))}">
-      ${cardHead('target', esc(past ? t('Pay tiers in {month}', { month: monthLabel(m) }) : t('Daily sales needed for each pay tier')), past ? '' : `<span class="kicker">${esc(t('From today to month end · {d} left', { d: cnt(daysLeft, '{n} day', '{n} days') }))}</span>`)}
+      ${cardHead('target', esc(past ? t('Pay tiers in {month}', { month: monthLabel(m) }) : t('Daily sales needed for each pay tier')), past ? '' : `<span class="kicker">${esc(t('From today to month end · {d} left', { d: stats.restDow != null ? cnt(daysLeft, '{n} working day', '{n} working days') : cnt(daysLeft, '{n} day', '{n} days') }))}</span>`)}
       <div class="tier-needs">${cards}</div>
     </section>`;
 }
@@ -1706,7 +1748,8 @@ function renderSellerStandards(name, asAdmin){
   const chips = days.map(d => {
     const mm = metOn(d);
     const c = callMinutes(d, name);
-    const cls = total && mm === total ? 'ok' : ((loggedOn(d) || d < today) ? 'short' : '');
+    const restD = isSellerRestDate(name, d);
+    const cls = total && mm === total ? 'ok' : (restD ? 'rest' : ((loggedOn(d) || d < today) ? 'short' : ''));
     return `<button type="button" class="day-chip ${total ? cls : (c !== null ? 'ok' : (d < today ? 'short' : ''))} ${d === date ? 'sel' : ''}" onclick="setActivityDate(${jsArg(name)}, '${d}')" aria-pressed="${d === date}" aria-label="${esc(dayLabel(d))}">${esc(weekday(d))} ${parseYmd(d).getDate()}<b class="num">${total ? `${mm}/${total}` : (c !== null ? fmtHM(c) : '—')}</b>${total ? `<small class="num">${c !== null ? fmtHM(c) : '—'}</small>` : ''}</button>`;
   }).join('');
   const history = [];
@@ -1732,7 +1775,8 @@ function renderSellerStandards(name, asAdmin){
     <div class="two-col">
       <div class="sticky">
         <section class="card slash" aria-label="${esc(t('Daily standards & calls'))}">
-          ${cardHead('check', esc(date === today ? t('Today’s standards & calls') : t('Standards & calls for {d}', { d: shortDay(date) })), total ? `<span class="pill ${met === total ? 'ok' : 'short'}">${esc(t('{m}/{n} reached', { m: met, n: total }))}</span>` : '')}
+          ${cardHead('check', esc(date === today ? t('Today’s standards & calls') : t('Standards & calls for {d}', { d: shortDay(date) })), isSellerRestDate(name, date) ? `<span class="pill plain rest-pill">${esc(t('Rest day'))}</span>` : (total ? `<span class="pill ${met === total ? 'ok' : 'short'}">${esc(t('{m}/{n} reached', { m: met, n: total }))}</span>` : ''))}
+          ${isSellerRestDate(name, date) ? `<p class="hint" style="margin-top:0 !important">${esc(t('This is a rest day: no standards are expected. You can still log if you worked.'))}</p>` : ''}
           ${errorHtml('act')}
           <div class="field"><label for="activity-date">${esc(t('Date'))}</label><input type="date" id="activity-date" value="${esc(date)}" max="${today}" onchange="setActivityDate(${jsArg(name)}, this.value)"></div>
           ${callField}
@@ -1787,7 +1831,7 @@ function viewWorkspace(){
   if (!s){
     return pageHead(esc(t('Admin')), esc(t('Seller workspaces')), esc(t('Open any seller to see and edit their sales and pay — no seller password needed.'))) + `
       ${name ? notFoundCard(name) : ''}
-      <div class="team-grid">${data.sellers.map(x => `
+      <div class="team-grid">${activeSellers().map(x => `
         <a class="seller-card" href="${hrefFor('seller', { name: x.name })}" style="text-decoration:none;color:inherit">
           <div class="top"><span class="avatar">${esc(initial(x.name))}</span><div class="who"><div class="name">${esc(x.name)}</div><div class="meta">${esc(catLabel(sellerInfo(x.name, currentMonthKey()).cat))}</div></div></div>
         </a>`).join('') || `<p class="empty">${esc(t('No sellers yet.'))}</p>`}</div>`;
@@ -1810,10 +1854,11 @@ function viewWorkspace(){
         <div>
           <div class="ws-name">${esc(name)}</div>
           <div class="ws-meta">
-            ${riskPill(snap.risk)}
+            ${isDeactivated(s) ? `<span class="pill off-pill">${esc(t('Deactivated'))}${s.endDate ? ' · ' + esc(t('last day {d}', { d: shortDay(s.endDate) })) : ''}</span>` : riskPill(snap.risk)}
             ${catPill(info.cat)}
             <span class="pill plain num">${info.plan ? esc(t('Plan {n}', { n: money(info.plan) })) : esc(t('No plan'))}</span>
             ${startNote(info, currentMonthKey()) ? `<span class="pill plain">${esc(startNote(info, currentMonthKey()))}</span>` : ''}
+            ${s.restDay != null ? `<span class="pill plain rest-pill">${esc(t('Rests: {d}', { d: weekdayName(s.restDay) }))}</span>` : ''}
             <span class="pill plain">${s.hasLogin ? esc(t('Login: {u}', { u: s.username || '✓' })) : esc(t('No login'))}</span>
           </div>
         </div>
@@ -1823,6 +1868,7 @@ function viewWorkspace(){
         </div>
       </div>
     </section>
+    ${isDeactivated(s) ? `<div class="banner banner-off" role="note"><span>${esc(t('{name} is deactivated: hidden from the team, login blocked. Sales and pay up to the last working day stay on record.', { name }))}</span><button type="button" class="btn btn-sm" onclick="reactivateSeller(${jsArg(name)})" ${busy ? 'disabled' : ''}>${esc(t('Reactivate'))}</button></div>` : ''}
     ${tabs}
     ${body}`;
 }
@@ -1855,6 +1901,8 @@ function renderSellerAccount(name){
         <div class="field"><label for="acct-plan">${esc(t("Own plan (so'm)"))}</label><input type="text" inputmode="numeric" id="acct-plan" class="amount-input" value="${Number(a.plan) > 0 ? fmt(a.plan) : ''}" placeholder="${esc(t('Empty = category plan'))}" autocomplete="off" oninput="formatThousandsLive(this)" onkeydown="if(event.key==='Enter')saveSellerPlan(${jsArg(name)})"></div>
         <div class="field"><label for="acct-start">${esc(t('Start date'))}</label><input type="date" id="acct-start" value="${esc(s.startDate || '')}"></div>
         <p class="hint" style="margin-top:-6px !important;margin-bottom:12px !important">${esc(t('In the start month the plan is prorated: monthly plan ÷ days in month × days from the start date. Leave empty if they worked the whole month.'))}</p>
+        <div class="field"><label for="acct-rest">${esc(t('Weekly rest day'))}</label>${restDaySelect('acct-rest', s.restDay)}</div>
+        <p class="hint" style="margin-top:-6px !important;margin-bottom:12px !important">${esc(t('Daily targets count only working days. No standards are expected on the rest day, and it never counts as a day without sales. A sale on a rest day still counts.'))}</p>
         <button type="button" class="btn" onclick="saveSellerPlan(${jsArg(name)})" ${busy ? 'disabled' : ''}>${esc(pendingKey === 'plan' ? t('Saving…') : t('Save'))}</button>
         <p class="hint">${esc(t('Applies from {month} on. Earlier months keep their own category and plan.', { month: monthLabel(month) }))}</p>
       </section>
@@ -1880,6 +1928,7 @@ function renderSellerAccount(name){
       </div>
       <p class="hint">${esc(t('Passwords are stored hashed — nobody can read them, including you. Resetting logs {name} out on every device.', { name }))}</p>
     </section>
+    ${deactivateCard(s)}
     <section class="card danger-zone" aria-label="${esc(t('Danger zone'))}">
       ${cardHead('alert', esc(t('Danger zone')))}
       <p>${esc(t('Remove {name} from the team. Their past sales stay on record and still count toward the team total; their login stops working immediately.', { name }))}</p>
@@ -1969,7 +2018,7 @@ function bulkCard(){
     if (e.date === date) onDate[e.seller] = (onDate[e.seller] || 0) + e.amount;
     if (e.date.startsWith(month)) monthBy[e.seller] = (monthBy[e.seller] || 0) + e.amount;
   });
-  const rows = data.sellers.map((s, i) => `
+  const rows = data.sellers.filter(s => activeOn(s, date)).map((s, i) => `
     <tr class="bulk-row">
       <td>${personCell(s.name, { tab: 'entries' })}</td>
       <td class="num hide-sm">${fmt(monthBy[s.name] || 0)}</td>
@@ -2032,6 +2081,8 @@ function viewTeam(){
   const f = ui.teamFilter;
   const month = currentMonthKey();
   const matchesFilter = (s) => {
+    if (f === 'deactivated') return isDeactivated(s);
+    if (isDeactivated(s)) return false;
     if (f === 'all') return true;
     if (f === 'C' || f === 'OTHER') return map[s.name].info.cat === f;
     if (f === 'nocat') return !map[s.name].info.cat;
@@ -2040,14 +2091,15 @@ function viewTeam(){
     return !!r && r.level === f;
   };
   const list = data.sellers.filter(s => (!q || s.name.toLowerCase().indexOf(q) !== -1 || (s.username || '').toLowerCase().indexOf(q) !== -1) && matchesFilter(s));
-  const count = (fn) => data.sellers.filter(fn).length;
+  const count = (fn) => activeSellers().filter(fn).length;
   const lvl = (l) => count(s => map[s.name].risk && map[s.name].risk.level === l);
+  const goneN = data.sellers.filter(isDeactivated).length;
   const filterOpts = [
-    ['all', 'All sellers', data.sellers.length],
+    ['all', 'All active sellers', activeSellers().length],
     ['critical', 'Critical', lvl('critical')], ['atrisk', 'At risk', lvl('atrisk')], ['needsattention', 'Need attention', lvl('needsattention')], ['ontrack', 'On track', lvl('ontrack')],
     ['C', 'C · Demo class', count(s => map[s.name].info.cat === 'C')], ['OTHER', 'Other · G, O, A, B', count(s => map[s.name].info.cat === 'OTHER')],
     ['nocat', 'No category', count(s => !map[s.name].info.cat)], ['nologin', 'No login', count(s => !s.hasLogin)],
-  ];
+  ].concat(goneN ? [['deactivated', 'Deactivated', goneN]] : []);
   const cards = list.map(s => {
     const x = map[s.name];
     const ws = hrefFor('seller', { name: s.name });
@@ -2056,15 +2108,18 @@ function viewTeam(){
       <article class="seller-card">
         <div class="top">
           <span class="avatar">${esc(initial(s.name))}</span>
-          <div class="who"><a class="name person" href="${ws}">${esc(s.name)}</a><div class="meta">${esc(catLabel(x.info.cat))}${startNote(x.info, month) ? ' · ' + esc(startNote(x.info, month)) : ''}</div></div>
-          ${riskPill(x.risk)}
+          <div class="who"><a class="name person" href="${ws}">${esc(s.name)}</a><div class="meta">${esc(catLabel(x.info.cat))}${startNote(x.info, month) ? ' · ' + esc(startNote(x.info, month)) : ''}${s.restDay != null ? ' · ' + esc(t('rests {d}', { d: weekdayName(s.restDay) })) : ''}</div></div>
+          ${isDeactivated(s) ? `<span class="pill off-pill">${esc(t('Deactivated'))}</span>` : riskPill(x.risk)}
         </div>
+        ${isDeactivated(s) ? `<div class="kicker">${esc(t('Last working day: {d}', { d: s.endDate ? shortDay(s.endDate) : '—' }))}</div>` : ''}
         <div class="nums"><span>${esc(t('Sold'))} <strong class="num">${fmtShort(x.stats.totalSold)}</strong></span><span>${esc(t('Plan'))} <strong class="num">${x.info.plan ? fmtShort(x.info.plan) : '—'}</strong></span></div>
         ${x.info.plan ? pctCell(x.stats.totalSold, x.info.plan) : `<div class="kicker">${esc(t('No plan yet'))}</div>`}
         <div class="nums"><span>${esc(t('Today'))} <strong class="num">${fmtShort(x.todaySold)}</strong></span><span>${esc(t('Pay so far'))} <strong class="num">${pay ? fmtShort(pay.total) : '—'}</strong></span></div>
         <div class="card-actions">
           <a class="btn btn-sm" href="${ws}">${esc(t('Open workspace'))}</a>
-          <button type="button" class="btn btn-sm btn-ghost" onclick="openSaleModal(${jsArg(s.name)})">${icon('plus')}<span>${esc(t('Sale'))}</span></button>
+          ${isDeactivated(s)
+            ? `<button type="button" class="btn btn-sm btn-ghost" onclick="reactivateSeller(${jsArg(s.name)})" ${busy ? 'disabled' : ''}>${icon('refresh')}<span>${esc(t('Reactivate'))}</span></button>`
+            : `<button type="button" class="btn btn-sm btn-ghost" onclick="openSaleModal(${jsArg(s.name)})">${icon('plus')}<span>${esc(t('Sale'))}</span></button>`}
         </div>
       </article>`;
   }).join('');
@@ -2078,7 +2133,7 @@ function viewTeam(){
             ${filterOpts.map(([v, l, n]) => `<option value="${v}" ${f === v ? 'selected' : ''}>${esc(t(l))} (${n})</option>`).join('')}
           </select>
         </div>
-        <div class="filter-summary"><strong class="num">${list.length}</strong>${esc(t('of {n}', { n: data.sellers.length }))}</div>
+        <div class="filter-summary"><strong class="num">${list.length}</strong>${esc(t('of {n}', { n: f === 'deactivated' ? goneN : activeSellers().length }))}</div>
       </div>
     </section>
     ${list.length ? `<div class="team-grid">${cards}</div>` : `<section class="card"><p class="empty">${esc(data.sellers.length ? t('No sellers match. Clear the search or filter.') : t('No sellers yet. Press “Add seller” to add your first one.'))}</p></section>`}`;
@@ -2092,7 +2147,7 @@ function viewSalaries(){
   const m = viewMonth();
   const past = isPast(m);
   let totFix = 0, totCom = 0, totAll = 0, totSold = 0;
-  const rows = data.sellers.map(s => {
+  const rows = rosterFor(m).map(s => {
     const info = sellerInfo(s.name, m);
     const sold = sumAmounts(monthSales(m, s.name));
     totSold += sold;
@@ -2100,7 +2155,7 @@ function viewSalaries(){
     if (pay){ totFix += pay.fixed; totCom += pay.commission; totAll += pay.total; }
     let proj = null;
     if (pay && !past){
-      const st = computeStats(data.entries.filter(e => e.seller === s.name), info.plan, m, { startDay: info.pf.startDay });
+      const st = computeStats(data.entries.filter(e => e.seller === s.name), info.plan, m, { startDay: info.pf.startDay, restDow: info.restDow });
       proj = computePay(st.forecastTotal, info.plan, info.tiers, 'seller');
     }
     return `
@@ -2146,17 +2201,22 @@ function viewCompliance(){
   const salesBySeller = {};
   data.entries.forEach(e => { if (e.date === date) salesBySeller[e.seller] = (salesBySeller[e.seller] || 0) + e.amount; });
   let metCells = 0;
-  const totalCells = data.sellers.length * data.standards.length;
-  const rows = data.sellers.map(s => {
+  const roster = data.sellers.filter(s => activeOn(s, date));
+  // Sellers on their weekly rest day aren't expected to hit standards that day.
+  const resting = (s) => isSellerRestDate(s.name, date);
+  const totalCells = roster.filter(s => !resting(s)).length * data.standards.length;
+  const rows = roster.map(s => {
     let met = 0;
+    const rest = resting(s);
     const cells = data.standards.map(std => {
       const rec = findActivity(date, s.name, std.name);
+      if (rest) return `<td class="compliance-cell none num">${rec ? rec.value : esc(t('rest'))}</td>`;
       if (!rec) return `<td class="compliance-cell none">—</td>`;
       const ok = rec.value >= std.minPerDay;
       if (ok) met++;
       return `<td class="compliance-cell ${ok ? 'ok' : 'short'} num">${rec.value}</td>`;
     }).join('');
-    metCells += met;
+    if (!rest) metCells += met;
     const all = met === data.standards.length;
     return `
       <tr>
@@ -2164,7 +2224,7 @@ function viewCompliance(){
         <td class="num">${salesBySeller[s.name] ? fmt(salesBySeller[s.name]) : '<span class="muted">—</span>'}</td>
         <td class="num">${callMinutes(date, s.name) !== null ? fmtHM(callMinutes(date, s.name)) : '<span class="muted">—</span>'}</td>
         ${cells}
-        <td>${data.standards.length ? `<span class="pill ${all ? 'ok' : 'short'}">${met}/${data.standards.length}</span>` : '—'}</td>
+        <td>${rest ? `<span class="pill plain rest-pill">${esc(t('Rest day'))}</span>` : (data.standards.length ? `<span class="pill ${all ? 'ok' : 'short'}">${met}/${data.standards.length}</span>` : '—')}</td>
         <td class="actions-cell"><button type="button" class="btn btn-sm btn-ghost" onclick="openStandardsFor(${jsArg(s.name)}, '${date}')">${esc(all ? t('View') : t('Fill in'))}</button></td>
       </tr>`;
   }).join('');
@@ -2222,7 +2282,7 @@ function draftFor(month){
     month,
     teamPlan: Number(c.teamPlan) || 0,
     teamMode: isSumPlan(c) ? 'sum' : 'manual',
-    teamSellers: (c.teamSellers || []).filter(n => !!sellerByName(n)),
+    teamSellers: (c.teamSellers || []).filter(n => rosterFor(month).some(s => s.name === n)),
     sellersCfg: c.sellers || {},
     leaderPlan: Number(c.leaderPlan) || 0,
     categories: { C: (c.categories && c.categories.C) || def.C, OTHER: (c.categories && c.categories.OTHER) || def.OTHER },
@@ -2252,7 +2312,7 @@ function syncPayDraft(){
 /* Each seller's plan for the edited month, using the category plans typed in the draft. */
 function draftSellerPlan(d, name){
   const base = sellerPayInfo({ sellers: d.sellersCfg, categories: d.categories }, name);
-  return planForMonth(base.plan, d.month, sellerStartDate(name));
+  return planForMonth(base.plan, d.month, sellerStartDate(name), sellerEndDate(name));
 }
 function draftTeamSum(d){ return d.teamSellers.reduce((s, n) => s + draftSellerPlan(d, n).plan, 0); }
 function payTeamChanged(){ syncPayDraft(); delete errors.pay; render({ fresh: true }); }
@@ -2262,14 +2322,15 @@ function teamPlanFields(d){
   if (d.teamMode !== 'sum'){
     return modeRow + `<div class="field"><label for="pc-team">${esc(t("Team plan (so'm)"))}</label><input type="text" inputmode="numeric" id="pc-team" class="amount-input" value="${d.teamPlan ? fmt(d.teamPlan) : ''}" oninput="formatThousandsLive(this)"></div>`;
   }
-  const names = sellerNames();
+  const names = rosterFor(d.month).map(s => s.name);
   const rows = names.length ? names.map(n => {
     const on = d.teamSellers.indexOf(n) !== -1;
     const pf = draftSellerPlan(d, n);
     const note = pf.notStarted ? t('Starts later') : pf.prorated ? t('{n} of {m} days', { n: pf.days, m: pf.dim }) : '';
+    const gone = isDeactivated(sellerByName(n)) ? ` <span class="pill off-pill">${esc(t('Deactivated'))}</span>` : '';
     return `<label class="team-pick ${on ? 'on' : ''}">
       <input type="checkbox" value="${esc(n)}" ${on ? 'checked' : ''} onchange="payTeamChanged()">
-      <span class="tp-name">${esc(n)}</span>
+      <span class="tp-name">${esc(n)}${gone}</span>
       <span class="tp-plan num">${pf.plan > 0 ? fmt(pf.plan) : `<span class="muted">${esc(t('No plan'))}</span>`}${note ? ` <span class="muted small">· ${esc(note)}</span>` : ''}</span>
       <span class="pill ${on ? 'ok' : 'extra-pill'}">${esc(on ? t('In plan') : t('Extra'))}</span>
     </label>`;
@@ -2430,7 +2491,7 @@ function standardsCard(){
 const AUDIT_LABELS = {
   saleCreated: 'Sale added', saleEdited: 'Sale edited', saleDeleted: 'Sale deleted',
   sellerCreated: 'Seller added', sellerEdited: 'Category / plan changed', sellerRenamed: 'Seller renamed', sellerDeleted: 'Seller removed',
-  sellerLoginSet: 'Login set', sellerStartChanged: 'Start date changed', sellerLoginRemoved: 'Login removed', planChanged: 'Team plan changed', payPlanChanged: 'Pay rules changed',
+  sellerLoginSet: 'Login set', sellerStartChanged: 'Start date changed', sellerDeactivated: 'Seller deactivated', sellerReactivated: 'Seller reactivated', sellerRestChanged: 'Rest day changed', sellerLoginRemoved: 'Login removed', planChanged: 'Team plan changed', payPlanChanged: 'Pay rules changed',
   standardCreated: 'Standard added', standardEdited: 'Standard edited', standardDeleted: 'Standard removed',
   activityLogged: 'Standards logged', passwordChanged: 'Password changed', adminSetup: 'Admin created',
 };
@@ -2620,7 +2681,8 @@ function calendarHtml(){
   const s = sellerByName(name);
   const start = s ? s.startDate : '';
   const info = sellerInfo(name, month);
-  const baseline = info.fullPlan > 0 ? info.fullPlan / dim : 0;
+  const rest = info.restDow;
+  const baseline = info.fullPlan > 0 ? info.fullPlan / (rest != null ? workDaysBetween(month, 1, dim, rest) : dim) : 0;
   const total = data.standards.length;
   const byDay = {};
   data.entries.forEach(e => { if (e.seller === name && e.date.startsWith(month)) (byDay[e.date] = byDay[e.date] || []).push(e); });
@@ -2639,13 +2701,15 @@ function calendarHtml(){
     sumSales += amt; sumMin += c || 0; if (amt > 0) salesDays++;
     const future = d > today;
     const off = !!start && d < start;
-    let cls = future ? 'future' : (off ? 'off' : (amt > 0 && (baseline === 0 || amt >= baseline) ? 'ok' : (d < today ? 'short' : '')));
+    const isRest = isRestDate(d, rest);
+    let cls = future ? 'future' : (off ? 'off' : (amt > 0 && (baseline === 0 || amt >= baseline) ? 'ok' : (isRest ? 'rest' : (d < today ? 'short' : ''))));
+    if (isRest && future) cls += ' rest';
     if (d === modal.day) cls += ' sel';
     if (d === today) cls += ' today';
     const dot = total && logged ? `<span class="cd-dot ${met === total ? 'ok' : 'short'}" title="${esc(t('{m}/{n} reached', { m: met, n: total }))}"></span>` : '';
     cells += `<button type="button" class="cal-day ${cls}" ${future ? 'disabled' : `onclick="calDay('${d}')"`} aria-pressed="${d === modal.day}" aria-label="${esc(dayLabel(d))}: ${esc(money(amt))}${c !== null ? ', ' + esc(fmtHM(c)) : ''}">
       <span class="cd-top"><span class="cd-num">${day}</span>${dot}</span>
-      <span class="cd-sales num">${amt ? (Math.round(amt / 1e5) / 10) : (future ? '' : '0')}</span>
+      <span class="cd-sales num">${amt ? (Math.round(amt / 1e5) / 10) : (isRest ? esc(t('rest')) : (future ? '' : '0'))}</span>
       <span class="cd-call num">${c !== null ? fmtHM(c) : ''}</span>
     </button>`;
   }
@@ -2674,7 +2738,7 @@ function calendarHtml(){
     <div class="cal-grid">${wd}${cells}</div>
     <p class="hint">${esc(t("Sales in mln so'm · call time in h:mm"))}${baseline ? ' · ' + esc(t('Green = at or above {n}/day (plan ÷ days in month)', { n: fmtShort(baseline) })) : ''}${start ? ' · ' + esc(t('Started {d}', { d: shortDay(start) })) : ''}</p>
     <div class="cal-detail">
-      <div class="cal-detail-head"><strong>${esc(dayLabel(d))}</strong><span class="num">${esc(money(sumAmounts(list)))}</span></div>
+      <div class="cal-detail-head"><strong>${esc(dayLabel(d))}${isRestDate(d, rest) ? ` <span class="pill plain rest-pill">${esc(t('Rest day'))}</span>` : ''}</strong><span class="num">${esc(money(sumAmounts(list)))}</span></div>
       <div class="cal-cols">
         <div><div class="kicker">${esc(t('Sales'))}</div>${salesRows}</div>
         <div>
@@ -2710,6 +2774,7 @@ function addSellerModalHtml(){
       </select>
     </div>
     <div class="field"><label for="m-start">${esc(t('Start date'))}</label><input type="date" id="m-start" value="${todayStr()}"></div>
+    <div class="field"><label for="m-rest">${esc(t('Weekly rest day'))}</label>${restDaySelect('m-rest', null)}</div>
     <p class="hint" style="margin-top:-8px !important;margin-bottom:12px !important">${esc(t('The plan for the start month is prorated from this day. Clear it for someone who worked the whole month.'))}</p>
     <div class="field"><label for="m-new-target">${esc(t("Own plan (so'm, optional)"))}</label><input type="text" inputmode="numeric" id="m-new-target" class="amount-input" placeholder="${esc(t('Empty = category plan'))}" autocomplete="off" oninput="formatThousandsLive(this)"></div>
     <label class="check"><input type="checkbox" id="m-login" ${login ? 'checked' : ''} onchange="toggleNewSellerLogin(this.checked)"> ${esc(t('Create a login now'))}</label>
@@ -2907,9 +2972,12 @@ async function saveSellerPlan(name){
   const payload = { action: 'updateSeller', name, category: cat, target };
   const s = sellerByName(name);
   if (start !== ((s && s.startDate) || '')) payload.startDate = start;
+  const restRaw = val('acct-rest');
+  const rest = restRaw === '' ? null : Number(restRaw);
+  if (s && rest !== s.restDay) payload.restDay = rest == null ? '' : rest;
   await runAction(payload, t('{name}: {cat}, plan {plan}.', { name, cat: catLabel(cat), plan: target ? fmt(target) : t('category default') }), {
     formKey: 'acct-plan', pendingKey: 'plan',
-    onSuccess: () => { ['acct-plan', 'acct-cat', 'acct-start'].forEach(id => resetFields.add(id)); },
+    onSuccess: () => { ['acct-plan', 'acct-cat', 'acct-start', 'acct-rest'].forEach(id => resetFields.add(id)); },
   });
 }
 async function saveCategoryQuick(name){
@@ -2957,6 +3025,56 @@ function removeLogin(name){
     }),
   });
 }
+/* ---- deactivate / reactivate ---- */
+function deactivateCard(s){
+  const name = s.name;
+  if (isDeactivated(s)){
+    return `
+    <section class="card" aria-label="${esc(t('Deactivated'))}">
+      ${cardHead('pause', esc(t('Deactivated')), `<span class="pill off-pill">${esc(t('Last working day: {d}', { d: s.endDate ? shortDay(s.endDate) : '—' }))}</span>`)}
+      <p>${esc(t('{name} is hidden from the team and can’t log in. Their sales and their pay up to the last working day stay on record.', { name }))}</p>
+      <button type="button" class="btn" onclick="reactivateSeller(${jsArg(name)})" ${busy ? 'disabled' : ''}>${icon('refresh')}<span>${esc(pendingKey === 'react' ? t('Saving…') : t('Reactivate {name}', { name }))}</span></button>
+    </section>`;
+  }
+  const today = todayStr();
+  return `
+    <section class="card" aria-label="${esc(t('Deactivate'))}">
+      ${cardHead('pause', esc(t('Deactivate')))}
+      <p>${esc(t('For someone who left. {name} disappears from the team, the sidebar and daily checks, and their login stops working. Sales stay on record; in the last month their plan counts only the days they worked. You can reactivate any time.', { name }))}</p>
+      ${errorHtml('acct-deact')}
+      <div class="form-grid form-narrow">
+        <div class="field"><label for="acct-end">${esc(t('Last working day'))}</label><input type="date" id="acct-end" value="${today}" max="${today}" ${s.startDate ? `min="${s.startDate}"` : ''}></div>
+        <div class="field"><button type="button" class="btn btn-danger" onclick="deactivateSeller(${jsArg(name)})" ${busy ? 'disabled' : ''}>${icon('pause')}<span>${esc(t('Deactivate {name}', { name }))}</span></button></div>
+      </div>
+    </section>`;
+}
+function deactivateSeller(name){
+  const s = sellerByName(name);
+  const end = val('acct-end') || todayStr();
+  const today = todayStr();
+  if (!isDateStr(end)) return fail('acct-deact', t('Invalid last working day.'));
+  if (end > today) return fail('acct-deact', t('The last working day can’t be in the future.'));
+  if (s && s.startDate && end < s.startDate) return fail('acct-deact', t('The last working day can’t be before the start date.'));
+  delete errors['acct-deact'];
+  openConfirm({
+    title: t('Deactivate {name}?', { name }),
+    text: t('Last working day: {d}. Their login stops working now. You can reactivate them later.', { d: shortDay(end) }),
+    confirmLabel: t('Deactivate'), danger: true,
+    run: () => runAction({ action: 'deactivateSeller', name, endDate: end }, t('{name} is deactivated.', { name }), {
+      formKey: 'modal', pendingKey: 'confirm', closeModal: true,
+    }),
+  });
+}
+function reactivateSeller(name){
+  openConfirm({
+    title: t('Reactivate {name}?', { name }),
+    text: t('{name} comes back to the team and can log in again with the same username and password.', { name }),
+    confirmLabel: t('Reactivate'),
+    run: () => runAction({ action: 'reactivateSeller', name }, t('{name} is active again.', { name }), {
+      formKey: 'modal', pendingKey: 'confirm', closeModal: true,
+    }),
+  });
+}
 function deleteSeller(name){
   openConfirm({
     title: t('Remove {name} from the team?', { name }),
@@ -2986,7 +3104,8 @@ async function submitAddSeller(){
   const category = catRaw === 'later' ? '' : catRaw;
   const startDate = val('m-start').trim();
   if (startDate && !isDateStr(startDate)) return fail('modal', t('Pick a valid start date.'));
-  await runAction({ action: 'addSeller', name, category, target, username, password, startDate }, t('Added {name}.', { name }), {
+  const restDay = val('m-rest');
+  await runAction({ action: 'addSeller', name, category, target, username, password, startDate, restDay }, t('Added {name}.', { name }), {
     formKey: 'modal', pendingKey: 'modal', closeModal: true,
   });
 }

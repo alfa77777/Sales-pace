@@ -973,3 +973,18 @@ td .sub-line{ margin-top: 4px; font-size: var(--text-xs); font-weight: 500; }
 }
 .team-sum strong{ font-size: 18px; color: var(--ink); }
 @media (max-width: 640px){ .team-picks{ grid-template-columns: 1fr; } }
+
+/* ---------- deactivated sellers ---------- */
+.pill.off-pill{ background: var(--surface-3); color: var(--ink-faint); border: 1px dashed var(--border-strong); }
+.banner.banner-off{
+  display: flex; align-items: center; justify-content: space-between; gap: var(--sp-3); flex-wrap: wrap;
+  background: var(--surface-2); border: 1px dashed var(--border-strong); color: var(--ink-soft);
+}
+.form-grid .field .btn{ min-height: 44px; }
+
+/* ---------- weekly rest day ---------- */
+.pill.rest-pill{ background: var(--violet-bg); color: var(--violet); }
+.day-chip.rest{ background: var(--violet-bg); border-color: transparent; color: var(--violet); }
+.day-chip.rest b{ color: var(--violet); font-weight: 600; font-size: 11px; text-transform: lowercase; }
+.cal-day.rest{ background: repeating-linear-gradient(135deg, var(--violet-bg) 0 6px, transparent 6px 12px); }
+.cal-day.rest .cd-sales{ color: var(--violet); font-size: 11px; }

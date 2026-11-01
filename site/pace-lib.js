@@ -40,6 +40,17 @@ function monthInfoFor(monthKey){
   const p = String(monthKey).split('-').map(Number);
   return getMonthInfo(new Date(p[0], p[1] - 1, 1));
 }
+/* Weekly rest day: restDow = 0 (Sunday) … 6 (Saturday), or null for none. */
+function validRestDow(v){ return v !== '' && v != null && Number.isInteger(Number(v)) && Number(v) >= 0 && Number(v) <= 6 ? Number(v) : null; }
+function weekdayOf(monthKey, day){ const p = String(monthKey).split('-').map(Number); return new Date(p[0], p[1] - 1, day).getDay(); }
+function isRestDay(monthKey, day, restDow){ return restDow != null && weekdayOf(monthKey, day) === restDow; }
+function isRestDate(dateStr, restDow){ return restDow != null && isRestDay(String(dateStr).slice(0, 7), entryDay(dateStr), restDow); }
+/* Working days from day `from` to day `to` (inclusive) in a month. */
+function workDaysBetween(monthKey, from, to, restDow){
+  let n = 0;
+  for (let d = Math.max(from, 1); d <= to; d++) if (!isRestDay(monthKey, d, restDow)) n++;
+  return n;
+}
 function decadeEnd(idx, daysInMonth){ return idx === 2 ? daysInMonth : (idx === 0 ? 10 : 20); }
 
 function monthEntries(allEntries, monthKey){
@@ -71,18 +82,28 @@ function computeLeaderboard(entries, names){
 /* A seller who starts mid-month gets a fair share of the monthly plan:
    plan ÷ days in month × days from the start date to month end.
    Before the start month: not working yet (plan 0). After it: full plan. */
-function planForMonth(plan, monthKey, startDate){
+/* A seller's fair plan for one month: plan ÷ days in month × days worked, from
+   the start date (mid-month starter) up to the end date (deactivated seller).
+   startDay/days/dim describe the worked span; notStarted/ended = no days at all. */
+function planForMonth(plan, monthKey, startDate, endDate){
   const info = monthInfoFor(monthKey);
   const dim = info.daysInMonth;
-  const full = { plan: plan, full: plan, startDay: 1, days: dim, dim: dim, prorated: false, notStarted: false };
-  if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return full;
-  const sm = startDate.slice(0, 7);
-  if (sm < monthKey) return full;
-  if (sm > monthKey) return { plan: 0, full: plan, startDay: dim + 1, days: 0, dim: dim, prorated: false, notStarted: true };
-  const startDay = Number(startDate.slice(8, 10));
-  if (startDay <= 1) return full;
-  const days = dim - startDay + 1;
-  return { plan: Math.round(plan * days / dim), full: plan, startDay: startDay, days: days, dim: dim, prorated: true, notStarted: false };
+  const ok = (d) => !!d && /^\d{4}-\d{2}-\d{2}$/.test(d);
+  let from = 1, to = dim;
+  if (ok(startDate)){
+    const sm = startDate.slice(0, 7);
+    if (sm > monthKey) return { plan: 0, full: plan, startDay: dim + 1, endDay: dim, days: 0, dim: dim, prorated: false, notStarted: true, ended: false };
+    if (sm === monthKey) from = Math.max(1, Number(startDate.slice(8, 10)));
+  }
+  if (ok(endDate)){
+    const em = endDate.slice(0, 7);
+    if (em < monthKey) return { plan: 0, full: plan, startDay: dim + 1, endDay: 0, days: 0, dim: dim, prorated: false, notStarted: false, ended: true };
+    if (em === monthKey) to = Math.min(dim, Number(endDate.slice(8, 10)));
+  }
+  if (to < from) return { plan: 0, full: plan, startDay: from, endDay: to, days: 0, dim: dim, prorated: true, notStarted: false, ended: true };
+  const days = to - from + 1;
+  if (days === dim) return { plan: plan, full: plan, startDay: 1, endDay: dim, days: dim, dim: dim, prorated: false, notStarted: false, ended: false };
+  return { plan: Math.round(plan * days / dim), full: plan, startDay: from, endDay: to, days: days, dim: dim, prorated: true, notStarted: false, ended: false };
 }
 
 /* opts.startDay: first working day in this month (mid-month starters) — the
@@ -100,21 +121,31 @@ function computeStats(allEntries, plan, monthKey, opts){
   const totalSold = entries.reduce((s,e)=> s + e.amount, 0);
   const remaining = Math.max(plan - totalSold, 0);
   const startDay = Math.min(Math.max(1, Number(opts.startDay) || 1), info.daysInMonth + 1);
-  if (closed) return Object.assign(closedStats(info, entries, plan, totalSold, remaining, startDay), { startDay });
-  const daysLeft = Math.max(info.daysInMonth - Math.max(info.dayOfMonth, startDay) + 1, 0);
+  // Seller's weekly rest day: targets, pace and forecast use working days only.
+  const restDow = validRestDow(opts.restDow);
+  const mk = info.monthKey;
+  if (closed) return Object.assign(closedStats(info, entries, plan, totalSold, remaining, startDay, restDow), { startDay, restDow });
+  const daysLeft = workDaysBetween(mk, Math.max(info.dayOfMonth, startDay), info.daysInMonth, restDow);
   const dailyTarget = daysLeft > 0 ? remaining / daysLeft : 0;
   const pctComplete = plan > 0 ? (totalSold / plan * 100) : 0;
 
   // Recent pace: average daily sales over the last up to 7 elapsed days.
   const RECENT_WINDOW = 7;
   const windowStart = Math.max(startDay, info.dayOfMonth - RECENT_WINDOW + 1);
-  const recentDays = Math.max(info.dayOfMonth - windowStart + 1, 0);
+  // Rest days in the window don't count as days (a sale on one still adds to the sum).
+  const recentDays = restDow == null ? Math.max(info.dayOfMonth - windowStart + 1, 0)
+    : workDaysBetween(mk, windowStart, info.dayOfMonth, restDow);
   const recentSum = entries
     .filter(e => { const day = entryDay(e.date); return day >= windowStart && day <= info.dayOfMonth; })
     .reduce((s,e)=> s + e.amount, 0);
-  const recentAvgDaily = recentDays > 0 ? recentSum / recentDays : 0;
+  let recentAvgDaily = recentDays > 0 ? recentSum / recentDays : recentSum; // a sale on a rest day 1 still counts
+  // No working day has passed yet this month (e.g. the 1st is their rest day):
+  // there is no pace to judge, so assume they're on pace instead of "0 → Critical".
+  const workedSoFar = restDow == null ? null : workDaysBetween(mk, startDay, info.dayOfMonth, restDow);
+  const noWorkYet = workedSoFar === 0 && recentSum === 0;
 
-  const daysRemainingAfterToday = Math.max(info.daysInMonth - Math.max(info.dayOfMonth, startDay - 1), 0);
+  const daysRemainingAfterToday = workDaysBetween(mk, Math.max(info.dayOfMonth + 1, startDay), info.daysInMonth, restDow);
+  if (noWorkYet) recentAvgDaily = daysLeft > 0 ? remaining / daysLeft : 0;
   const forecastTotal = totalSold + recentAvgDaily * daysRemainingAfterToday;
   const forecastPct = plan > 0 ? (forecastTotal / plan * 100) : 0;
   const paceStatus = forecastPct >= 100 ? 'good' : (forecastPct >= 80 ? 'warn' : 'bad');
@@ -155,11 +186,12 @@ function computeStats(allEntries, plan, monthKey, opts){
     info, entries, plan, totalSold, remaining, daysLeft, dailyTarget, pctComplete, decades,
     recentAvgDaily, recentDays, forecastTotal, forecastPct, paceStatus, paceRatio, neededStatus,
     startDay, started: info.dayOfMonth >= startDay,
+    restDow, restToday: isRestDay(mk, info.dayOfMonth, restDow),
   };
 }
 
-function closedStats(info, entries, plan, totalSold, remaining, startDay){
-  const workDays = Math.max(info.daysInMonth - (startDay || 1) + 1, 1);
+function closedStats(info, entries, plan, totalSold, remaining, startDay, restDow){
+  const workDays = Math.max(workDaysBetween(info.monthKey, startDay || 1, info.daysInMonth, restDow == null ? null : restDow), 1);
   const pctComplete = plan > 0 ? (totalSold / plan * 100) : 0;
   const paceStatus = pctComplete >= 100 ? 'good' : (pctComplete >= 80 ? 'warn' : 'bad');
   const decades = DECADES.map((d, idx) => {
@@ -203,9 +235,9 @@ function sellerPayInfo(cfg, name){
    (cfg.teamMode === 'sum'). Mid-month starters add their prorated plan.
    Must match teamPlanIn_() in Code.gs. */
 function isSumPlan(cfg){ return !!cfg && cfg.teamMode === 'sum'; }
-function teamPlanSum(cfg, monthKey, startDateOf){
+function teamPlanSum(cfg, monthKey, startDateOf, endDateOf){
   return (cfg.teamSellers || []).reduce((sum, name) =>
-    sum + planForMonth(sellerPayInfo(cfg, name).plan, monthKey, startDateOf(name) || '').plan, 0);
+    sum + planForMonth(sellerPayInfo(cfg, name).plan, monthKey, startDateOf(name) || '', endDateOf ? endDateOf(name) || '' : '').plan, 0);
 }
 
 /* ---------- pay (salary) tiers ----------

@@ -10,7 +10,8 @@ Sales tracking and payroll dashboard for the Englify sales team. Sellers log dai
 - **Seller workspaces** — personal pace, forecast, daily target for each commission tier, and pay card.
 - **Payroll** — category-based commission tiers (C · Demo class, Other · G/O/A/B), fixed pay, team-leader bonus, mid-month hire proration.
 - **Call time & daily standards** — calendar view and compliance tracking.
-- **Admin** — manage sellers, plans, bulk sales entry, and open any seller's workspace.
+- **Weekly rest day** — one rest weekday per seller; daily targets, pace and forecasts count working days only.
+- **Admin** — manage sellers, plans, bulk sales entry, and open any seller's workspace; deactivate sellers who leave (history and last-month pay kept) or reactivate them.
 - **Logins** — per-seller accounts with signed 7-day session tokens.
 
 ## Structure

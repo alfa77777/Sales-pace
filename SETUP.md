@@ -7,7 +7,7 @@ This folder has two parts:
 
 Your existing logins, sales, standards and audit log keep working. The update adds new columns and two new tabs by itself:
 
-- **Sellers → Category** (column F) and **StartDate** (column G)
+- **Sellers → Category** (column F), **StartDate** (column G) and **EndDate** (column H, filled when you deactivate someone) and **RestDay** (column I, 0 = Sunday … 6 = Saturday)
 - **Entries → Class** (column E)
 - **CallTime** tab: call time per seller per day, in minutes
 - **PlanConfig** tab: pay rules per month. Don't edit it by hand.
@@ -73,6 +73,8 @@ Old personal targets are **not** used anymore. Plans now come from each seller's
 6. For a seller with a different plan, open **Account** and type an **Own plan**.
 7. For a seller who started this month, set their **Start date** in **Account**. Their plan for that month is prorated by days; their fixed pay is not.
 8. Optional: under **Team plan is**, choose **Sum of selected sellers** and tick the sellers whose plans make the team plan. Only ticked sellers' sales count toward the team plan, its % and the 10-day reward milestones. Unticked sellers show as **Extra**: their sales appear separately as "+X extra". The team leader bonus still counts all sales.
+9. When someone leaves: open their workspace → **Account** → **Deactivate**, and pick their last working day. They disappear from the team and can't log in, their sales stay, and their last month's plan counts only the days they worked. To bring them back: **Team → Show: Deactivated → Reactivate**.
+10. Set each seller's **Weekly rest day** in their workspace → **Account** (or when adding a seller). Their daily targets then count only working days. On the rest day no standards are expected, and it never counts as a day without sales. A sale on a rest day still counts.
 
 ## 8. Check it works
 

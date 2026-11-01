@@ -60,7 +60,7 @@ const PUBLIC_ACTIONS = { login: true, setupAdmin: true };
 const MAX_BULK_ROWS = 200;
 const ADMIN_ACTIONS = {
   setPlan: true, savePayConfig: true, addEntriesBulk: true,
-  addSeller: true, updateSeller: true, renameSeller: true, deleteSeller: true, setSellerCredentials: true,
+  addSeller: true, updateSeller: true, deactivateSeller: true, reactivateSeller: true, renameSeller: true, deleteSeller: true, setSellerCredentials: true,
   addStandard: true, updateStandard: true, deleteStandard: true,
 };
 
@@ -115,9 +115,13 @@ function ensureHeader_(sheet, col, title) {
   return sheet;
 }
 function ensureSellersSheet_()   {
-  const sh = ensureSheet_('Sellers', ['Name', 'Target', 'Username', 'PasswordHash', 'Salt', 'Category', 'StartDate']);
+  const sh = ensureSheet_('Sellers', ['Name', 'Target', 'Username', 'PasswordHash', 'Salt', 'Category', 'StartDate', 'EndDate', 'RestDay']);
   ensureHeader_(sh, 6, 'Category');
-  return ensureHeader_(sh, 7, 'StartDate');
+  ensureHeader_(sh, 7, 'StartDate');
+  // EndDate: last working day of a deactivated seller (empty = active).
+  ensureHeader_(sh, 8, 'EndDate');
+  // RestDay: weekly day off, 0 = Sunday … 6 = Saturday (empty = none).
+  return ensureHeader_(sh, 9, 'RestDay');
 }
 function ensureCallTimeSheet_()  { return ensureSheet_('CallTime', ['Date', 'Seller', 'Minutes']); }
 function ensureEntriesSheet_()   { return ensureHeader_(ensureSheet_('Entries', ['Date', 'Seller', 'Amount', 'ID', 'Class']), 5, 'Class'); }
@@ -205,6 +209,22 @@ function validateSale_(date, amount) {
   if (Number(amount) > MAX_AMOUNT) return 'That amount is too large — check for extra zeros.';
   return null;
 }
+/* A deactivated seller can't get sales dated after their last working day. */
+function afterEndError_(seller, date) {
+  const sheet = ensureSellersSheet_();
+  const row = findRow_(sheet, 1, seller);
+  if (row === -1) return null;
+  const end = cellDate_(sheet.getRange(row, 8).getValue());
+  return end && date > end ? seller + ' was deactivated after ' + end + '. Sales after that day can’t be added.' : null;
+}
+const REST_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+/* '' = no rest day, else an integer 0–6. Returns null when invalid. */
+function parseRestDay_(v) {
+  if (v === '' || v == null) return '';
+  const n = Number(v);
+  return Number.isInteger(n) && n >= 0 && n <= 6 ? n : null;
+}
+function restDayCell_(v) { const r = parseRestDay_(v); return r === null ? '' : r; }
 function validateAmount_(amount) {
   if (!isPositiveNumber_(amount)) return 'Amount must be a number greater than 0.';
   if (Number(amount) > MAX_AMOUNT) return 'That amount is too large — check for extra zeros.';
@@ -309,16 +329,24 @@ function daysInMonth_(month) {
   const p = month.split('-');
   return new Date(Number(p[0]), Number(p[1]), 0).getDate();
 }
-/* Same rule as planForMonth() in pace-lib.js: plan ÷ days in month × days worked. */
-function proratedPlan_(plan, month, startDate) {
-  if (!startDate || !/^\d{4}-\d{2}-\d{2}$/.test(startDate)) return plan;
-  const sm = startDate.slice(0, 7);
-  if (sm < month) return plan;
-  if (sm > month) return 0;
-  const startDay = Number(startDate.slice(8, 10));
-  if (startDay <= 1) return plan;
+/* Same rule as planForMonth() in pace-lib.js: plan ÷ days in month × days worked
+   (from the start date, up to the end date of a deactivated seller). */
+function proratedPlan_(plan, month, startDate, endDate) {
   const dim = daysInMonth_(month);
-  return Math.round(plan * (dim - startDay + 1) / dim);
+  let from = 1, to = dim;
+  if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+    const sm = startDate.slice(0, 7);
+    if (sm > month) return 0;
+    if (sm === month) from = Math.max(1, Number(startDate.slice(8, 10)));
+  }
+  if (endDate && /^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+    const em = endDate.slice(0, 7);
+    if (em < month) return 0;
+    if (em === month) to = Math.min(dim, Number(endDate.slice(8, 10)));
+  }
+  if (to < from) return 0;
+  if (from === 1 && to === dim) return plan;
+  return Math.round(plan * (to - from + 1) / dim);
 }
 /* Same rule as sellerPayInfo() in pace-lib.js. */
 function sellerPlanIn_(cfg, name) {
@@ -327,29 +355,34 @@ function sellerPlanIn_(cfg, name) {
   const c = cfg && cfg.categories && cfg.categories[a.cat];
   return c ? Number(c.plan) || 0 : 0;
 }
-function teamPlanIn_(cfg, month, startDates) {
+function teamPlanIn_(cfg, month, dates) {
   if (!isSumMode_(cfg)) return Number(cfg && cfg.teamPlan) || 0;
   return (cfg.teamSellers || []).reduce(function (sum, name) {
-    return sum + proratedPlan_(sellerPlanIn_(cfg, name), month, startDates[name] || '');
+    return sum + proratedPlan_(sellerPlanIn_(cfg, name), month, dates.start[name] || '', dates.end[name] || '');
   }, 0);
 }
-function readStartDates_() {
-  const out = {};
+/* { start: {name: date}, end: {name: date} } for every seller on the roster. */
+function readSellerDates_() {
+  const out = { start: {}, end: {} };
   const sheet = ensureSellersSheet_();
   if (sheet.getLastRow() < 2) return out;
-  sheet.getRange(2, 1, sheet.getLastRow() - 1, 7).getValues().forEach(function (row) {
+  sheet.getRange(2, 1, sheet.getLastRow() - 1, 8).getValues().forEach(function (row) {
     if (row[0] === '') return;
-    const sd = row[6] === '' || row[6] == null ? '' : formatDate_(row[6]);
-    out[String(row[0])] = isValidDateStr_(sd) ? sd : '';
+    out.start[String(row[0])] = cellDate_(row[6]);
+    out.end[String(row[0])] = cellDate_(row[7]);
   });
   return out;
+}
+function cellDate_(v) {
+  const d = v === '' || v == null ? '' : formatDate_(v);
+  return isValidDateStr_(d) ? d : '';
 }
 /* Keeps Config B1 equal to this month's team plan (handy when reading the sheet). */
 function syncConfigPlan_() {
   const month = currentMonth_();
   const rows = readPlanRows_();
   const cfg = effectiveFrom_(rows, month) || legacyBase_();
-  ensureConfigSheet_().getRange('B1').setValue(teamPlanIn_(cfg, month, readStartDates_()));
+  ensureConfigSheet_().getRange('B1').setValue(teamPlanIn_(cfg, month, readSellerDates_()));
 }
 
 /* A seller's category / own plan applies from this month on, including any
@@ -441,8 +474,9 @@ function readSession_(token) {
   const sheet = ensureSellersSheet_();
   const row = findRow_(sheet, 1, p.n);
   if (row === -1) return null;
-  const vals = sheet.getRange(row, 1, 1, 5).getValues()[0];
+  const vals = sheet.getRange(row, 1, 1, 8).getValues()[0];
   if (!vals[2] || versionOf_(vals[4]) !== p.v) return null;
+  if (cellDate_(vals[7])) return null; // deactivated: every open session stops at once
   return { role: 'seller', name: String(p.n) };
 }
 function sessionResponse_(role, name, salt, extra) {
@@ -499,20 +533,25 @@ function doGet(e) {
   const planRows = readPlanRows_();
   const payBase = planRows.length ? null : legacyBase_();
   const current = effectiveFrom_(planRows, currentMonth_()) || payBase || payDefaults_();
-  const startDates = {};
+  const dates = { start: {}, end: {} };
 
   const sellers = [];
   const sellersSheet = ensureSellersSheet_();
   if (sellersSheet.getLastRow() > 1) {
-    sellersSheet.getRange(2, 1, sellersSheet.getLastRow() - 1, 7).getValues().forEach(function (row) {
+    sellersSheet.getRange(2, 1, sellersSheet.getLastRow() - 1, 9).getValues().forEach(function (row) {
       if (row[0] === '') return;
       const a = (current.sellers || {})[String(row[0])] || { cat: '', plan: 0 };
       const s = { name: String(row[0]), hasLogin: !!row[2] };
-      const sd = row[6] === '' || row[6] == null ? '' : formatDate_(row[6]);
-      startDates[s.name] = isValidDateStr_(sd) ? sd : '';
+      dates.start[s.name] = cellDate_(row[6]);
+      dates.end[s.name] = cellDate_(row[7]);
+      // Deactivated sellers: everyone sees the month they left (to hide them
+      // from later months); only logged-in users see the exact last day.
+      if (dates.end[s.name]) s.endMonth = dates.end[s.name].slice(0, 7);
       if (session) {
         s.target = Number(a.plan) || 0; s.category = a.cat || '';
-        s.startDate = startDates[s.name];
+        s.startDate = dates.start[s.name];
+        s.endDate = dates.end[s.name];
+        s.restDay = restDayCell_(row[8]);
       }
       if (isAdmin) s.username = String(row[2] || '');
       sellers.push(s);
@@ -580,11 +619,11 @@ function doGet(e) {
   entries.forEach(function (en) { const m = en.date.slice(0, 7); if (m < first) first = m; });
   for (let m = first, n = 0; m <= nextMonth_(cur) && n < 120; m = nextMonth_(m), n++) {
     const cfg = effectiveFrom_(planRows, m) || payBase;
-    if (isSumMode_(cfg)) teamPlans[m] = teamPlanIn_(cfg, m, startDates);
+    if (isSumMode_(cfg)) teamPlans[m] = teamPlanIn_(cfg, m, dates);
   }
 
   return jsonOutput_({
-    plan: teamPlanIn_(current, cur, startDates),
+    plan: teamPlanIn_(current, cur, dates),
     teamPlans: teamPlans,
     sellers: sellers,
     entries: entries,
@@ -655,8 +694,9 @@ const ACTIONS = {
     const sellersSheet = ensureSellersSheet_();
     const sRow = findUsernameRow_(sellersSheet, 3, username);
     if (sRow !== -1) {
-      const s = sellersSheet.getRange(sRow, 1, 1, 5).getValues()[0];
+      const s = sellersSheet.getRange(sRow, 1, 1, 8).getValues()[0];
       if (!verifyPassword_(password, s[4], s[3])) return fail_(BAD_LOGIN);
+      if (cellDate_(s[7])) return fail_('This account is deactivated. Ask your team leader.');
       return sessionResponse_('seller', String(s[0]), s[4], { target: Number(s[1]) || 0 });
     }
     return fail_(BAD_LOGIN);
@@ -761,7 +801,7 @@ const ACTIONS = {
     let picked = null;
     if (hasMode) {
       if (body.teamSellers != null && !Array.isArray(body.teamSellers)) return fail_('Choose the sellers for the team plan.');
-      const roster = readStartDates_();
+      const roster = readSellerDates_().start;
       picked = [];
       const list = body.teamSellers || [];
       for (let i = 0; i < list.length; i++) {
@@ -815,6 +855,8 @@ const ACTIONS = {
     const cls = body.cls == null || body.cls === '' ? '' : String(body.cls);
     if (cls && !validClass_(cls)) return fail_('Choose the client class: C, G, O, A or B.');
     if (findRow_(ensureSellersSheet_(), 1, seller) === -1) return fail_('Unknown seller.');
+    const endErr = afterEndError_(seller, body.date);
+    if (endErr) return fail_(endErr);
 
     const id = Utilities.getUuid();
     ensureEntriesSheet_().appendRow([body.date, seller, Number(body.amount), id, cls]);
@@ -848,6 +890,7 @@ const ACTIONS = {
       if (!seller || findRow_(ensureSellersSheet_(), 1, seller) === -1) return fail_('Unknown seller.');
     }
     const date = hasDate ? body.date : formatDate_(vals[0]);
+    if (hasDate || hasSeller) { const endErr = afterEndError_(seller, date); if (endErr) return fail_(endErr); }
     const amount = hasAmount ? Number(body.amount) : Number(vals[2]);
     const cls = hasCls ? String(body.cls) : String(vals[4] || '');
     sheet.getRange(row, 1, 1, 3).setValues([[date, seller, amount]]);
@@ -874,6 +917,8 @@ const ACTIONS = {
       const seller = String(r.seller || '').trim();
       if (!seller || findRow_(sellersSheet, 1, seller) === -1) return fail_('Unknown seller: ' + (seller || '(blank)') + '.');
       if (seen[seller]) return fail_(seller + ' appears twice. Combine the amounts into one row.');
+      const endErr = afterEndError_(seller, body.date);
+      if (endErr) return fail_(endErr);
       seen[seller] = true;
       const aErr = validateAmount_(r.amount);
       if (aErr) return fail_(seller + ': ' + aErr);
@@ -916,6 +961,8 @@ const ACTIONS = {
     if (!validCategory_(cat)) return fail_('Choose the seller’s category: C or Other.');
     const start = body.startDate == null ? '' : String(body.startDate);
     if (start && !isValidDateStr_(start)) return fail_('Invalid start date.');
+    const rest = parseRestDay_(body.restDay);
+    if (rest === null) return fail_('Choose a rest day from Sunday to Saturday.');
     const sheet = ensureSellersSheet_();
     if (findRow_(sheet, 1, name) !== -1) return fail_('A seller with that name already exists.');
 
@@ -930,9 +977,9 @@ const ACTIONS = {
       const salt = makeSalt_();
       login = [username, hashPassword_(password, salt), salt];
     }
-    sheet.appendRow([name, Number(target) || 0].concat(login, [cat, start]));
+    sheet.appendRow([name, Number(target) || 0].concat(login, [cat, start, '', rest]));
     setSellerAssignment_(name, cat, target, session);
-    logAudit_('sellerCreated', 'Seller', name, '', 'category: ' + (cat || '—') + ', own plan: ' + (Number(target) || 'default') + (start ? ', starts ' + start : '') + (username ? ', username: ' + username : ''), actor_(session));
+    logAudit_('sellerCreated', 'Seller', name, '', 'category: ' + (cat || '—') + ', own plan: ' + (Number(target) || 'default') + (start ? ', starts ' + start : '') + (rest !== '' ? ', rests ' + REST_DAY_NAMES[rest] : '') + (username ? ', username: ' + username : ''), actor_(session));
     return jsonOutput_({ ok: true });
   },
 
@@ -983,13 +1030,22 @@ const ACTIONS = {
     const hasTarget = body.target !== undefined && body.target !== null && body.target !== '';
     const hasCat = body.category !== undefined && body.category !== null;
     const hasStart = body.startDate !== undefined && body.startDate !== null;
-    if (!hasTarget && !hasCat && !hasStart) return fail_('Nothing to change.');
+    const hasRest = body.restDay !== undefined && body.restDay !== null;
+    if (!hasTarget && !hasCat && !hasStart && !hasRest) return fail_('Nothing to change.');
+    const rest = hasRest ? parseRestDay_(body.restDay) : '';
+    if (rest === null) return fail_('Choose a rest day from Sunday to Saturday.');
     if (hasTarget) { const err = validateTarget_(body.target); if (err) return fail_(err); }
     if (hasCat && !validCategory_(String(body.category))) return fail_('Choose the seller’s category: C or Other.');
     if (hasStart && body.startDate !== '' && !isValidDateStr_(String(body.startDate))) return fail_('Invalid start date.');
     const sheet = ensureSellersSheet_();
     const row = findRow_(sheet, 1, body.name);
     if (row === -1) return fail_('Seller not found.');
+    if (hasRest) {
+      const oldRest = restDayCell_(sheet.getRange(row, 9).getValue());
+      sheet.getRange(row, 9).setValue(rest);
+      logAudit_('sellerRestChanged', 'Seller', body.name, oldRest === '' ? '—' : REST_DAY_NAMES[oldRest], rest === '' ? '—' : REST_DAY_NAMES[rest], actor_(session));
+      if (!hasTarget && !hasCat && !hasStart) return jsonOutput_({ ok: true });
+    }
     if (hasStart) {
       const oldStart = sheet.getRange(row, 7).getValue();
       const cell = sheet.getRange(row, 7);
@@ -1005,6 +1061,48 @@ const ACTIONS = {
     logAudit_('sellerEdited', 'Seller', body.name,
       'category: ' + (old.cat || '—') + ', own plan: ' + (Number(old.plan) || 'default'),
       'category: ' + (cat || '—') + ', own plan: ' + (plan || 'default'), actor_(session));
+    return jsonOutput_({ ok: true });
+  },
+
+  /* Admin: deactivate = hide from the team and block their login, but keep their
+     sales and their plan up to the last working day (endDate, default today). */
+  deactivateSeller: function (body, session) {
+    const sheet = ensureSellersSheet_();
+    const row = findRow_(sheet, 1, body.name);
+    if (row === -1) return fail_('Seller not found.');
+    const today = dateOffsetStr_(0);
+    const end = body.endDate == null || body.endDate === '' ? today : String(body.endDate);
+    if (!isValidDateStr_(end)) return fail_('Invalid last working day.');
+    if (end > today) return fail_('The last working day can’t be in the future.');
+    const start = cellDate_(sheet.getRange(row, 7).getValue());
+    if (start && end < start) return fail_('The last working day can’t be before the start date.');
+    // Sales dated after the last day would sit outside their working time: refuse.
+    const es = ensureEntriesSheet_();
+    if (es.getLastRow() > 1) {
+      let latest = '';
+      es.getRange(2, 1, es.getLastRow() - 1, 2).getValues().forEach(function (r) {
+        if (String(r[1]) === String(body.name) && r[0] !== '') { const d = formatDate_(r[0]); if (d > latest) latest = d; }
+      });
+      if (latest > end) return fail_(body.name + ' has sales up to ' + latest + '. Choose that day or later, or move those sales first.');
+    }
+    const old = cellDate_(sheet.getRange(row, 8).getValue());
+    const cell = sheet.getRange(row, 8);
+    cell.setNumberFormat('@');
+    cell.setValue(end);
+    if (sheet.getLastRow() > 1 && ensurePlanConfigSheet_().getLastRow() > 1) syncConfigPlan_();
+    logAudit_('sellerDeactivated', 'Seller', body.name, old ? 'last day ' + old : 'active', 'last day ' + end, actor_(session));
+    return jsonOutput_({ ok: true, endDate: end });
+  },
+
+  reactivateSeller: function (body, session) {
+    const sheet = ensureSellersSheet_();
+    const row = findRow_(sheet, 1, body.name);
+    if (row === -1) return fail_('Seller not found.');
+    const old = cellDate_(sheet.getRange(row, 8).getValue());
+    if (!old) return fail_('This seller is already active.');
+    sheet.getRange(row, 8).setValue('');
+    if (ensurePlanConfigSheet_().getLastRow() > 1) syncConfigPlan_();
+    logAudit_('sellerReactivated', 'Seller', body.name, 'last day ' + old, 'active', actor_(session));
     return jsonOutput_({ ok: true });
   },
 
