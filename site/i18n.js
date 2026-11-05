@@ -772,4 +772,9 @@ const UZ = {
   "over {n} working days": "{n} ish kuni bo'yicha",
   "{n} working day": "{n} ish kuni",
   "{n} working days": "{n} ish kuni",
+  "Count sales of": "Savdolarni hisoblash",
+  "Plan sellers": "Rejadagi sotuvchilar",
+  "Everyone’s sales against the same plan. Reward milestones still count plan sellers only.": "Hammaning savdosi o'sha reja bilan solishtiriladi. Mukofot bosqichlari baribir faqat rejadagi sotuvchilarni hisoblaydi.",
+  "Only ticked sellers count; others show as extra.": "Faqat belgilangan sotuvchilar hisoblanadi; qolganlari qo'shimcha bo'lib ko'rinadi.",
+  "incl. +{v} extra": "shu jumladan +{v} qo'shimcha",
 };

@@ -968,7 +968,7 @@ function renderHero(label, amount, stats, marks, note, extra){
         <div class="track-pct num">${stats.pctComplete.toFixed(stats.pctComplete < 10 ? 1 : 0)}%</div>
       </div>
       <div class="hero-foot">
-        <span>${esc(t('Sold'))} <strong class="num">${money(stats.totalSold)}</strong>${extra && extra.amount > 0 ? ` <span class="pill extra-pill" title="${esc(extra.names.join(', ') + ' · ' + t('Total with extra: {v}', { v: money(extra.total) }))}">${esc(t('+{v} extra', { v: fmtShort(extra.amount) }))}</span>` : ''}</span>
+        <span>${esc(t('Sold'))} <strong class="num">${money(stats.totalSold)}</strong>${extra && extra.amount > 0 ? ` <span class="pill extra-pill" title="${esc(extra.names.join(', ') + ' · ' + t('Total with extra: {v}', { v: money(extra.total) }))}">${esc(extra.included ? t('incl. +{v} extra', { v: fmtShort(extra.amount) }) : t('+{v} extra', { v: fmtShort(extra.amount) }))}</span>` : ''}</span>
         <span>${stats.remaining > 0 ? `${esc(t('Remaining'))} <strong class="num">${money(stats.remaining)}</strong>` : `<strong>${esc(t('Plan reached'))} 🎉</strong>`}</span>
       </div>
     </section>`;
@@ -1174,6 +1174,18 @@ function viewLoadError(){
     </section>`;
 }
 
+/* Dashboard view in sum mode (admin only): 'plan' = plan sellers only, 'all' = everyone combined.
+   Remembered per device. */
+function dashView(){ return storeGet('salesPace.dashView') === 'all' ? 'all' : 'plan'; }
+function setDashView(v){ storeSet('salesPace.dashView', v === 'all' ? 'all' : 'plan'); render({ fresh: true }); }
+function dashViewSwitch(showAll){
+  const b = (v, label, on) => `<button type="button" class="seg-btn ${on ? 'on' : ''}" aria-pressed="${on}" onclick="setDashView('${v}')">${esc(label)}</button>`;
+  return `<div class="view-switch-row">
+    <span class="view-switch-label">${esc(t('Count sales of'))}</span>
+    <div class="seg" role="group" aria-label="${esc(t('Count sales of'))}">${b('plan', t('Plan sellers'), !showAll)}${b('all', t('All sellers'), showAll)}</div>
+    <span class="hint view-switch-hint">${esc(showAll ? t('Everyone’s sales against the same plan. Reward milestones still count plan sellers only.') : t('Only ticked sellers count; others show as extra.'))}</span>
+  </div>`;
+}
 function viewDashboard(){
   const m = viewMonth();
   const plan = teamPlanFor(m);
@@ -1188,24 +1200,29 @@ function viewDashboard(){
   // Sum mode: the team plan's progress (hero, milestones, tiles, charts) counts
   // ONLY the selected sellers. Others' sales show as "+X extra" on top.
   // Leaderboard, latest sales and class mix still list everyone.
+  // Admin-only switch "All sellers": the old combined view (everyone's sales vs
+  // the same plan). Reward milestones always stay plan-sellers only.
   const ts = teamSellersFor(m);
   const inPlan = (e) => !ts || ts.indexOf(e.seller) !== -1;
   const all = computeStats(data.entries, plan, m);
-  const stats = ts ? computeStats(data.entries.filter(inPlan), plan, m) : all;
+  const planStats = ts ? computeStats(data.entries.filter(inPlan), plan, m) : all;
+  const showAll = !!ts && isAdmin() && dashView() === 'all';
+  const stats = showAll ? all : planStats;
   const todaySold = sumAmounts(stats.entries.filter(e => e.date === todayStr()));
   let extra = null;
   if (ts){
     const extraEntries = all.entries.filter(e => !inPlan(e));
-    extra = { amount: sumAmounts(extraEntries), names: [...new Set(extraEntries.map(e => e.seller))], total: all.totalSold };
+    extra = { amount: sumAmounts(extraEntries), names: [...new Set(extraEntries.map(e => e.seller))], total: all.totalSold, included: showAll };
   }
-  const calls = ts ? data.calls.filter(c => ts.indexOf(c.seller) !== -1) : data.calls;
+  const calls = ts && !showAll ? data.calls.filter(c => ts.indexOf(c.seller) !== -1) : data.calls;
   return head + pastBanner(m)
+    + (ts && isAdmin() ? dashViewSwitch(showAll) : '')
     + renderHero(t('Team plan'), plan, stats, null, ts ? cnt(ts.length, 'Sum of {n} seller', 'Sum of {n} sellers') : '', extra)
-    + renderDecadesCard(stats, !!ts)
+    + renderDecadesCard(planStats, !!ts)
     + (isAdmin() && !isPast(m) ? renderActionCenter() : '')
     + renderStatTiles(stats, todaySold, true)
     + renderChartCard(stats, t('Team pace'), { reward: true })
-    + (session ? renderSalesCallsCard(t(ts ? 'Plan sellers: sales & call time' : 'Team sales & call time'), stats.entries, calls, m) : '')
+    + (session ? renderSalesCallsCard(t(ts && !showAll ? 'Plan sellers: sales & call time' : 'Team sales & call time'), stats.entries, calls, m) : '')
     + `<div class="grid-2">${renderLeaderboardCard(m)}${renderLatestSalesCard(all.entries, m)}</div>`
     + renderClassMix(all.entries, t('Sales by client class'));
 }
