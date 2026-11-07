@@ -444,7 +444,10 @@ function classifyRisk(stats, options){
     }
     return { level: 'ontrack', label: L.ontrack, reason: paceT('Plan already reached.') };
   }
-  if (stats.paceStatus === 'bad' && (stats.forecastPct < 50 || stale)){
+  // The first 3 days of a month are too early to call anyone Critical: one slow
+  // day swings the forecast a lot. They show as At risk at most.
+  const early = stats.info && stats.info.dayOfMonth <= 3 && !stats.closed;
+  if (stats.paceStatus === 'bad' && (stats.forecastPct < 50 || stale) && !early){
     return {
       level: 'critical', label: L.critical,
       reason: stale

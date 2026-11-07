@@ -9,11 +9,12 @@
  * 4. The /exec URL goes in ONE place now: index.html (window.SALES_PACE_SCRIPT_URL).
  *
  * TABS (created automatically when missing)
- *   Config    A1 "Monthly Plan", B1 = team plan (kept in sync; PlanConfig is the source)
- *   Sellers   Name | Target | Username | PasswordHash | Salt | Category | StartDate
+ *   Config    A1 "Monthly Plan", B1 = all teams' plan this month (kept in sync; PlanConfig is the source)
+ *   Sellers   Name | Target | Username | PasswordHash | Salt | Category | StartDate | EndDate | RestDay | Team
  *             (Target = this seller's own plan, 0 = the category's default;
  *              Category = C or OTHER. Shown for reading — PlanConfig is the source)
- *   Entries   Date | Seller | Amount | ID | Class   (Class: C, G, O, A or B)
+ *   Entries   Date | Seller | Amount | ID | Class | Product | Payment
+ *             (Class: C, G, O, A or B; Product and Payment from the RNP lists)
  *   PlanConfig Month | Config   one JSON row per month that has its own pay rules:
  *             team plan, leader plan, C and OTHER plans + pay tiers, leader tiers,
  *             and each seller's category / own plan. A month without a row uses
@@ -22,6 +23,8 @@
  *   Activity  Date | Seller | Standard | Value
  *   CallTime  Date | Seller | Minutes   (call time per seller per day; sellers log
  *             their own, the admin can correct anyone's)
+ *   Leads     Date | Seller | Taken | Contacted   (leads per seller per day, for RNP)
+ *   Teams     Id | Name   (Sellers → Team holds the Id; team 1 always exists)
  *   Admin     Username | PasswordHash | Salt
  *   AuditLog  Timestamp | Action | RecordType | RecordId | OldValue | NewValue | Actor
  *   Never type passwords into the sheet — set them from the app.
@@ -62,6 +65,7 @@ const ADMIN_ACTIONS = {
   setPlan: true, savePayConfig: true, addEntriesBulk: true,
   addSeller: true, updateSeller: true, deactivateSeller: true, reactivateSeller: true, renameSeller: true, deleteSeller: true, setSellerCredentials: true,
   addStandard: true, updateStandard: true, deleteStandard: true,
+  addTeam: true, renameTeam: true, deleteTeam: true,
 };
 
 /* Client classes recorded on every sale. */
@@ -69,6 +73,12 @@ const SALE_CLASSES = ['C', 'G', 'O', 'A', 'B'];
 /* Seller pay categories: C = demo-class clients, OTHER = G, O, A, B clients. */
 const CATEGORIES = ['C', 'OTHER'];
 const MAX_TIERS = 12;
+/* RNP: what was sold and how it was paid (same lists as the Englify ERP RNP page). */
+const PRODUCTS = ['Prepayment', "Bo'talog'im", "Jo'shqin", 'Uchqun', 'Math', 'Milliy sertifikat', "Speaking jo'shqin"];
+const PAYMENTS = ['Payme', 'Click', 'Uzum_pay', 'Paynet', 'Octo', 'Open bank', 'Bank', 'Uzcard', 'Paylov', 'Uzum_nasiya', 'Alif mobile', 'Anor nasiya', 'Paylater', 'Variant', 'Yandex split', 'Tozamoliya'];
+const MAX_LEADS = 100000;
+const DEFAULT_TEAM = '1';
+const MAX_TEAMS = 20;
 
 /* Starting pay rules. The admin changes them in the app (Settings → Plans & pay). */
 function payDefaults_() {
@@ -121,10 +131,53 @@ function ensureSellersSheet_()   {
   // EndDate: last working day of a deactivated seller (empty = active).
   ensureHeader_(sh, 8, 'EndDate');
   // RestDay: weekly day off, 0 = Sunday … 6 = Saturday (empty = none).
-  return ensureHeader_(sh, 9, 'RestDay');
+  ensureHeader_(sh, 9, 'RestDay');
+  // Team: the team's Id from the Teams tab (empty = the first team, "1").
+  return ensureHeader_(sh, 10, 'Team');
+}
+/* Teams tab: Id, Name. The first team (Id 1) always exists; it holds everyone
+   who was on the team before teams were added. */
+function ensureTeamsSheet_() {
+  const sh = ensureSheet_('Teams', ['Id', 'Name']);
+  if (sh.getLastRow() < 2) {
+    const r = sh.getRange(2, 1, 1, 2);
+    r.setNumberFormat('@');
+    r.setValues([[DEFAULT_TEAM, 'Team 1']]);
+  }
+  return sh;
+}
+function readTeams_() {
+  const sh = ensureTeamsSheet_();
+  const out = [];
+  sh.getRange(2, 1, sh.getLastRow() - 1, 2).getValues().forEach(function (r) {
+    const id = String(r[0] === '' || r[0] == null ? '' : r[0]).replace(/\.0+$/, '').trim();
+    if (id) out.push({ id: id, name: String(r[1] || '').trim() || ('Team ' + id) });
+  });
+  if (!out.some(function (t) { return t.id === DEFAULT_TEAM; })) out.unshift({ id: DEFAULT_TEAM, name: 'Team 1' });
+  return out;
+}
+function teamCell_(v, teams) {
+  const id = String(v === '' || v == null ? '' : v).replace(/\.0+$/, '').trim();
+  return id && teams.some(function (t) { return t.id === id; }) ? id : DEFAULT_TEAM;
 }
 function ensureCallTimeSheet_()  { return ensureSheet_('CallTime', ['Date', 'Seller', 'Minutes']); }
-function ensureEntriesSheet_()   { return ensureHeader_(ensureSheet_('Entries', ['Date', 'Seller', 'Amount', 'ID', 'Class']), 5, 'Class'); }
+function ensureEntriesSheet_()   {
+  const sh = ensureHeader_(ensureSheet_('Entries', ['Date', 'Seller', 'Amount', 'ID', 'Class', 'Product', 'Payment']), 5, 'Class');
+  ensureHeader_(sh, 6, 'Product');
+  return ensureHeader_(sh, 7, 'Payment');
+}
+/* Leads per seller per day: taken (assigned) and contacted. */
+function ensureLeadsSheet_()     { return ensureSheet_('Leads', ['Date', 'Seller', 'Taken', 'Contacted']); }
+function validProduct_(v) { return PRODUCTS.indexOf(String(v)) !== -1; }
+function validPayment_(v) { return PAYMENTS.indexOf(String(v)) !== -1; }
+/* '' = not set; returns null when invalid. */
+function saleExtra_(body) {
+  const product = body.product == null ? '' : String(body.product);
+  const payment = body.payment == null ? '' : String(body.payment);
+  if (product && !validProduct_(product)) return { error: 'Choose a product from the list.' };
+  if (payment && !validPayment_(payment)) return { error: 'Choose a payment method from the list.' };
+  return { product: product, payment: payment };
+}
 function ensurePlanConfigSheet_() { return ensureSheet_('PlanConfig', ['Month', 'Config']); }
 function ensureStandardsSheet_() { return ensureSheet_('Standards', ['Name', 'Unit', 'MinPerDay']); }
 function ensureActivitySheet_()  { return ensureSheet_('Activity', ['Date', 'Seller', 'Standard', 'Value']); }
@@ -325,6 +378,25 @@ function validateTiers_(tiers, kind) {
    that month (prorated for mid-month starters, like the app does). Sales by
    sellers who are not selected show as "extra". Anything else = typed cfg.teamPlan. */
 function isSumMode_(cfg) { return !!cfg && cfg.teamMode === 'sum'; }
+/* Per-team settings inside one month's config. Team 1 keeps them at the top
+   level (as before teams existed); every other team lives in cfg.teams[id]:
+   { teamPlan, leaderPlan, teamMode, teamSellers, leader: { tiers } }.
+   create = true makes the slot (for writing). */
+function teamSlot_(cfg, teamId, create) {
+  if (!teamId || teamId === DEFAULT_TEAM) return cfg;
+  if (!cfg.teams || typeof cfg.teams !== 'object') { if (!create) return emptySlot_(cfg); cfg.teams = {}; }
+  if (!cfg.teams[teamId]) { if (!create) return emptySlot_(cfg); cfg.teams[teamId] = emptySlot_(cfg); }
+  return cfg.teams[teamId];
+}
+function emptySlot_(cfg) {
+  const tiers = cfg && cfg.leader && Array.isArray(cfg.leader.tiers) ? cfg.leader.tiers : payDefaults_().leader.tiers;
+  return { teamPlan: 0, leaderPlan: 0, teamMode: 'manual', teamSellers: [], leader: { tiers: JSON.parse(JSON.stringify(tiers)) } };
+}
+/* Every team slot in a config (for renames / removals). */
+function eachSlot_(cfg, fn) {
+  fn(cfg, DEFAULT_TEAM);
+  if (cfg.teams && typeof cfg.teams === 'object') Object.keys(cfg.teams).forEach(function (id) { fn(cfg.teams[id], id); });
+}
 function daysInMonth_(month) {
   const p = month.split('-');
   return new Date(Number(p[0]), Number(p[1]), 0).getDate();
@@ -355,11 +427,22 @@ function sellerPlanIn_(cfg, name) {
   const c = cfg && cfg.categories && cfg.categories[a.cat];
   return c ? Number(c.plan) || 0 : 0;
 }
-function teamPlanIn_(cfg, month, dates) {
-  if (!isSumMode_(cfg)) return Number(cfg && cfg.teamPlan) || 0;
-  return (cfg.teamSellers || []).reduce(function (sum, name) {
+function teamPlanIn_(cfg, month, dates, teamId) {
+  const slot = teamSlot_(cfg, teamId, false);
+  if (!isSumMode_(slot)) return Number(slot && slot.teamPlan) || 0;
+  return (slot.teamSellers || []).reduce(function (sum, name) {
     return sum + proratedPlan_(sellerPlanIn_(cfg, name), month, dates.start[name] || '', dates.end[name] || '');
   }, 0);
+}
+/* { name: teamId } for every seller on the roster. */
+function readSellerTeams_(teams) {
+  const out = {};
+  const sheet = ensureSellersSheet_();
+  if (sheet.getLastRow() < 2) return out;
+  sheet.getRange(2, 1, sheet.getLastRow() - 1, 10).getValues().forEach(function (row) {
+    if (row[0] !== '') out[String(row[0])] = teamCell_(row[9], teams || readTeams_());
+  });
+  return out;
 }
 /* { start: {name: date}, end: {name: date} } for every seller on the roster. */
 function readSellerDates_() {
@@ -377,12 +460,30 @@ function cellDate_(v) {
   const d = v === '' || v == null ? '' : formatDate_(v);
   return isValidDateStr_(d) ? d : '';
 }
-/* Keeps Config B1 equal to this month's team plan (handy when reading the sheet). */
+/* Keeps Config B1 equal to this month's plan of all teams together (handy when reading the sheet). */
 function syncConfigPlan_() {
   const month = currentMonth_();
   const rows = readPlanRows_();
   const cfg = effectiveFrom_(rows, month) || legacyBase_();
-  ensureConfigSheet_().getRange('B1').setValue(teamPlanIn_(cfg, month, readSellerDates_()));
+  const dates = readSellerDates_();
+  const total = readTeams_().reduce(function (s, t) { return s + teamPlanIn_(cfg, month, dates, t.id); }, 0);
+  ensureConfigSheet_().getRange('B1').setValue(total);
+}
+
+/* Takes a seller out of every team's plan sum from this month on (and planned
+   months). Past months keep their plan as it was. Returns true if any plan rules exist. */
+function removeFromSums_(name) {
+  const month = currentMonth_();
+  const rows = readPlanRows_();
+  const has = function (cfg) { let f = false; eachSlot_(cfg, function (sl) { if ((sl.teamSellers || []).indexOf(name) !== -1) f = true; }); return f; };
+  const strip = function (cfg) { eachSlot_(cfg, function (sl) { if (Array.isArray(sl.teamSellers)) sl.teamSellers = sl.teamSellers.filter(function (n) { return n !== name; }); }); };
+  const eff = effectiveFrom_(rows, month);
+  if (eff && has(eff)) updateMonthConfig_(month, strip);
+  const sheet = ensurePlanConfigSheet_();
+  readPlanRows_().forEach(function (r) {
+    if (r.month > month && has(r.config)) { strip(r.config); writePlanRow_(sheet, r.row, r.month, r.config); }
+  });
+  return rows.length > 0;
 }
 
 /* A seller's category / own plan applies from this month on, including any
@@ -518,12 +619,18 @@ function withIdempotency_(clientRequestId, fn) {
 /* Guests see team plans only. In sum mode they also see WHO is in the plan
    (names are already on the public leaderboard), never anyone's own plan:
    the summed team plan comes precomputed per month in doGet's teamPlans. */
+function publicSlot_(slot) {
+  const sum = isSumMode_(slot);
+  return { teamPlan: Number(slot.teamPlan) || 0, leaderPlan: 0, leader: { tiers: [] }, teamMode: sum ? 'sum' : 'manual', teamSellers: sum ? (slot.teamSellers || []).slice() : [] };
+}
 function publicConfig_(cfg) {
-  const sum = isSumMode_(cfg);
-  return {
-    teamPlan: Number(cfg.teamPlan) || 0, leaderPlan: 0, categories: {}, leader: { tiers: [] }, sellers: {},
-    teamMode: sum ? 'sum' : 'manual', teamSellers: sum ? (cfg.teamSellers || []).slice() : [],
-  };
+  const out = publicSlot_(cfg);
+  out.categories = {}; out.sellers = {};
+  if (cfg.teams && typeof cfg.teams === 'object') {
+    out.teams = {};
+    Object.keys(cfg.teams).forEach(function (id) { out.teams[id] = publicSlot_(cfg.teams[id]); });
+  }
+  return out;
 }
 
 function doGet(e) {
@@ -534,14 +641,15 @@ function doGet(e) {
   const payBase = planRows.length ? null : legacyBase_();
   const current = effectiveFrom_(planRows, currentMonth_()) || payBase || payDefaults_();
   const dates = { start: {}, end: {} };
+  const teams = readTeams_();
 
   const sellers = [];
   const sellersSheet = ensureSellersSheet_();
   if (sellersSheet.getLastRow() > 1) {
-    sellersSheet.getRange(2, 1, sellersSheet.getLastRow() - 1, 9).getValues().forEach(function (row) {
+    sellersSheet.getRange(2, 1, sellersSheet.getLastRow() - 1, 10).getValues().forEach(function (row) {
       if (row[0] === '') return;
       const a = (current.sellers || {})[String(row[0])] || { cat: '', plan: 0 };
-      const s = { name: String(row[0]), hasLogin: !!row[2] };
+      const s = { name: String(row[0]), hasLogin: !!row[2], team: teamCell_(row[9], teams) };
       dates.start[s.name] = cellDate_(row[6]);
       dates.end[s.name] = cellDate_(row[7]);
       // Deactivated sellers: everyone sees the month they left (to hide them
@@ -561,11 +669,26 @@ function doGet(e) {
   const entries = [];
   const entriesSheet = ensureEntriesSheet_();
   if (entriesSheet.getLastRow() > 1) {
-    entriesSheet.getRange(2, 1, entriesSheet.getLastRow() - 1, 5).getValues().forEach(function (row, i) {
+    entriesSheet.getRange(2, 1, entriesSheet.getLastRow() - 1, 7).getValues().forEach(function (row, i) {
       if (row[0] === '' || row[2] === '' || row[2] == null) return;
       const id = row[3] ? String(row[3]) : '__row' + (i + 2); // legacy rows without an ID
-      entries.push({ id: id, date: formatDate_(row[0]), seller: String(row[1] || ''), amount: Number(row[2]) || 0, cls: validClass_(row[4]) ? String(row[4]) : '' });
+      const en = { id: id, date: formatDate_(row[0]), seller: String(row[1] || ''), amount: Number(row[2]) || 0, cls: validClass_(row[4]) ? String(row[4]) : '' };
+      // Product and payment method are for logged-in users (RNP); the public board needs amounts only.
+      if (session) { en.product = validProduct_(row[5]) ? String(row[5]) : ''; en.payment = validPayment_(row[6]) ? String(row[6]) : ''; }
+      entries.push(en);
     });
+  }
+
+  const leads = [];
+  if (session) {
+    const leadSheet = ensureLeadsSheet_();
+    if (leadSheet.getLastRow() > 1) {
+      leadSheet.getRange(2, 1, leadSheet.getLastRow() - 1, 4).getValues().forEach(function (row) {
+        if (row[0] === '' || row[1] === '') return;
+        const ld = { date: formatDate_(row[0]), seller: String(row[1]), taken: Number(row[2]) || 0, contacted: Number(row[3]) || 0 };
+        if (isAdmin || ld.seller === session.name) leads.push(ld);
+      });
+    }
   }
 
   const standards = [];
@@ -613,23 +736,31 @@ function doGet(e) {
 
   // Team plan per month where it is a sum of sellers' plans: from the first month
   // with sales up to next month. Guests need it (they never see sellers' plans).
+  // Shape: { teamId: { 'YYYY-MM': plan } }.
   const teamPlans = {};
   const cur = currentMonth_();
   let first = cur;
   entries.forEach(function (en) { const m = en.date.slice(0, 7); if (m < first) first = m; });
   for (let m = first, n = 0; m <= nextMonth_(cur) && n < 120; m = nextMonth_(m), n++) {
     const cfg = effectiveFrom_(planRows, m) || payBase;
-    if (isSumMode_(cfg)) teamPlans[m] = teamPlanIn_(cfg, m, dates);
+    teams.forEach(function (t) {
+      if (!isSumMode_(teamSlot_(cfg, t.id, false))) return;
+      (teamPlans[t.id] = teamPlans[t.id] || {})[m] = teamPlanIn_(cfg, m, dates, t.id);
+    });
   }
 
   return jsonOutput_({
-    plan: teamPlanIn_(current, cur, dates),
+    plan: teamPlanIn_(current, cur, dates, DEFAULT_TEAM),
     teamPlans: teamPlans,
+    teams: teams,
     sellers: sellers,
     entries: entries,
     standards: standards,
     activity: activity,
     calls: calls,
+    leads: leads,
+    products: PRODUCTS,
+    payments: PAYMENTS,
     adminExists: ensureAdminSheet_().getLastRow() > 1,
     auditLog: auditLog,
     // Pay rules and seller categories are for logged-in team members only;
@@ -777,14 +908,17 @@ const ACTIONS = {
     if (Number(body.plan) > MAX_AMOUNT) return fail_('That plan is too large — check for extra zeros.');
     const month = isValidMonth_(body.month) ? body.month : currentMonth_();
     if (month > nextMonth_(currentMonth_())) return fail_('You can plan at most one month ahead.');
+    const teamId = body.team == null || body.team === '' ? DEFAULT_TEAM : String(body.team);
+    if (!readTeams_().some(function (t) { return t.id === teamId; })) return fail_('Team not found.');
     let oldVal = 0;
     // A typed team plan means "manual": it replaces a sum-of-sellers plan for that month.
     updateMonthConfig_(month, function (cfg) {
-      oldVal = cfg.teamPlan || 0; cfg.teamPlan = Number(body.plan);
-      if (isSumMode_(cfg)) cfg.teamMode = 'manual';
+      const slot = teamSlot_(cfg, teamId, true);
+      oldVal = slot.teamPlan || 0; slot.teamPlan = Number(body.plan);
+      if (isSumMode_(slot)) slot.teamMode = 'manual';
     });
     if (month === currentMonth_()) syncConfigPlan_();
-    logAudit_('planChanged', 'Config', 'plan ' + month, oldVal, Number(body.plan), actor_(session));
+    logAudit_('planChanged', 'Config', 'plan ' + month + (teamId === DEFAULT_TEAM ? '' : ' · team ' + teamId), oldVal, Number(body.plan), actor_(session));
     return jsonOutput_({ ok: true });
   },
 
@@ -793,6 +927,11 @@ const ACTIONS = {
     const month = isValidMonth_(body.month) ? body.month : null;
     if (!month) return fail_('Choose a month.');
     if (month > nextMonth_(currentMonth_())) return fail_('You can plan at most one month ahead.');
+    // Team plan, leader plan and leader table belong to one team; seller pay tables are for everyone.
+    const teams = readTeams_();
+    const teamId = body.team == null || body.team === '' ? DEFAULT_TEAM : String(body.team);
+    const teamRow = teams.filter(function (t) { return t.id === teamId; })[0];
+    if (!teamRow) return fail_('Team not found.');
     const leader = body.leaderPlan === '' || body.leaderPlan == null ? 0 : body.leaderPlan;
     // teamMode missing = an older app version: keep the month's current mode and selection.
     const hasMode = body.teamMode !== undefined && body.teamMode !== null;
@@ -802,11 +941,13 @@ const ACTIONS = {
     if (hasMode) {
       if (body.teamSellers != null && !Array.isArray(body.teamSellers)) return fail_('Choose the sellers for the team plan.');
       const roster = readSellerDates_().start;
+      const teamOf = readSellerTeams_(teams);
       picked = [];
       const list = body.teamSellers || [];
       for (let i = 0; i < list.length; i++) {
         const n = String(list[i]);
         if (!Object.prototype.hasOwnProperty.call(roster, n)) return fail_('Unknown seller: ' + n + '.');
+        if (teamOf[n] !== teamId) return fail_(n + ' is not in ' + teamRow.name + '.');
         if (picked.indexOf(n) === -1) picked.push(n);
       }
       if (sumMode && !picked.length) return fail_('Select at least one seller for the team plan.');
@@ -830,17 +971,20 @@ const ACTIONS = {
     const lt = body.leader && Array.isArray(body.leader.tiers) ? body.leader.tiers.slice() : null;
     const lerr = validateTiers_(lt, 'leader');
     if (lerr) return fail_(lerr);
-    const saved = updateMonthConfig_(month, function (cfg) {
-      if (team !== null) cfg.teamPlan = Number(team);
-      cfg.leaderPlan = Number(leader);
+    let slotSaved = null;
+    updateMonthConfig_(month, function (cfg) {
       cfg.categories = clean;
-      cfg.leader = { tiers: lt };
-      if (hasMode) { cfg.teamMode = sumMode ? 'sum' : 'manual'; cfg.teamSellers = picked; }
+      const slot = teamSlot_(cfg, teamId, true);
+      if (team !== null) slot.teamPlan = Number(team);
+      slot.leaderPlan = Number(leader);
+      slot.leader = { tiers: lt };
+      if (hasMode) { slot.teamMode = sumMode ? 'sum' : 'manual'; slot.teamSellers = picked; }
+      slotSaved = JSON.parse(JSON.stringify(slot));
     });
     if (month === currentMonth_()) syncConfigPlan_();
-    const teamText = isSumMode_(saved)
-      ? 'team = sum of ' + saved.teamSellers.length + ' sellers (' + saved.teamSellers.join(', ') + ')'
-      : 'team ' + Number(saved.teamPlan);
+    const teamText = (teams.length > 1 ? teamRow.name + ': ' : '') + (isSumMode_(slotSaved)
+      ? 'team = sum of ' + slotSaved.teamSellers.length + ' sellers (' + slotSaved.teamSellers.join(', ') + ')'
+      : 'team ' + Number(slotSaved.teamPlan));
     logAudit_('payPlanChanged', 'PlanConfig', month, '', teamText + ', C ' + clean.C.plan + ', OTHER ' + clean.OTHER.plan, actor_(session));
     return jsonOutput_({ ok: true });
   },
@@ -857,10 +1001,12 @@ const ACTIONS = {
     if (findRow_(ensureSellersSheet_(), 1, seller) === -1) return fail_('Unknown seller.');
     const endErr = afterEndError_(seller, body.date);
     if (endErr) return fail_(endErr);
+    const ex = saleExtra_(body);
+    if (ex.error) return fail_(ex.error);
 
     const id = Utilities.getUuid();
-    ensureEntriesSheet_().appendRow([body.date, seller, Number(body.amount), id, cls]);
-    logAudit_('saleCreated', 'Entry', id, '', seller + ' / ' + body.date + ' / ' + Number(body.amount) + (cls ? ' / ' + cls : ''), actor_(session));
+    ensureEntriesSheet_().appendRow([body.date, seller, Number(body.amount), id, cls, ex.product, ex.payment]);
+    logAudit_('saleCreated', 'Entry', id, '', seller + ' / ' + body.date + ' / ' + Number(body.amount) + (cls ? ' / ' + cls : '') + (ex.product ? ' / ' + ex.product : '') + (ex.payment ? ' / ' + ex.payment : ''), actor_(session));
     return jsonOutput_({ ok: true, id: id });
   },
 
@@ -870,7 +1016,11 @@ const ACTIONS = {
     const hasDate = body.date !== undefined && body.date !== null;
     const hasSeller = body.seller !== undefined && body.seller !== null;
     const hasCls = body.cls !== undefined && body.cls !== null;
-    if (!hasAmount && !hasDate && !hasSeller && !hasCls) return fail_('Nothing to change.');
+    const hasProduct = body.product !== undefined && body.product !== null;
+    const hasPayment = body.payment !== undefined && body.payment !== null;
+    if (!hasAmount && !hasDate && !hasSeller && !hasCls && !hasProduct && !hasPayment) return fail_('Nothing to change.');
+    if (hasProduct && body.product !== '' && !validProduct_(body.product)) return fail_('Choose a product from the list.');
+    if (hasPayment && body.payment !== '' && !validPayment_(body.payment)) return fail_('Choose a payment method from the list.');
     if (hasCls && !validClass_(body.cls)) return fail_('Choose the client class: C, G, O, A or B.');
     if (hasAmount) { const err = validateAmount_(body.amount); if (err) return fail_(err); }
     if (hasDate) {
@@ -880,7 +1030,7 @@ const ACTIONS = {
     const sheet = ensureEntriesSheet_();
     const row = findEntryRow_(sheet, body.id);
     if (row === -1) return fail_('That entry no longer exists. Refresh and try again.');
-    const vals = sheet.getRange(row, 1, 1, 5).getValues()[0];
+    const vals = sheet.getRange(row, 1, 1, 7).getValues()[0];
     if (session.role === 'seller' && String(vals[1]) !== session.name) return fail_('You can only edit your own entries.');
 
     let seller = String(vals[1]);
@@ -893,11 +1043,14 @@ const ACTIONS = {
     if (hasDate || hasSeller) { const endErr = afterEndError_(seller, date); if (endErr) return fail_(endErr); }
     const amount = hasAmount ? Number(body.amount) : Number(vals[2]);
     const cls = hasCls ? String(body.cls) : String(vals[4] || '');
+    const product = hasProduct ? String(body.product) : String(vals[5] || '');
+    const payment = hasPayment ? String(body.payment) : String(vals[6] || '');
     sheet.getRange(row, 1, 1, 3).setValues([[date, seller, amount]]);
-    sheet.getRange(row, 5).setValue(cls);
+    sheet.getRange(row, 5, 1, 3).setValues([[cls, product, payment]]);
+    const tail = function (c, pr, pa) { return (c ? ' / ' + c : '') + (pr ? ' / ' + pr : '') + (pa ? ' / ' + pa : ''); };
     logAudit_('saleEdited', 'Entry', body.id,
-      vals[1] + ' / ' + formatDate_(vals[0]) + ' / ' + vals[2] + (vals[4] ? ' / ' + vals[4] : ''),
-      seller + ' / ' + date + ' / ' + amount + (cls ? ' / ' + cls : ''), actor_(session));
+      vals[1] + ' / ' + formatDate_(vals[0]) + ' / ' + vals[2] + tail(vals[4], vals[5], vals[6]),
+      seller + ' / ' + date + ' / ' + amount + tail(cls, product, payment), actor_(session));
     return jsonOutput_({ ok: true });
   },
 
@@ -923,6 +1076,8 @@ const ACTIONS = {
       const aErr = validateAmount_(r.amount);
       if (aErr) return fail_(seller + ': ' + aErr);
       if (r.cls != null && r.cls !== '' && !validClass_(r.cls)) return fail_(seller + ': choose the client class: C, G, O, A or B.');
+      const ex = saleExtra_(r);
+      if (ex.error) return fail_(seller + ': ' + ex.error.charAt(0).toLowerCase() + ex.error.slice(1));
     }
     const sheet = ensureEntriesSheet_();
     const ids = [];
@@ -930,7 +1085,8 @@ const ACTIONS = {
       const id = Utilities.getUuid();
       const seller = String(r.seller).trim();
       const cls = r.cls ? String(r.cls) : '';
-      sheet.appendRow([body.date, seller, Number(r.amount), id, cls]);
+      const ex = saleExtra_(r);
+      sheet.appendRow([body.date, seller, Number(r.amount), id, cls, ex.product, ex.payment]);
       logAudit_('saleCreated', 'Entry', id, '', seller + ' / ' + body.date + ' / ' + Number(r.amount) + (cls ? ' / ' + cls : '') + ' (bulk)', actor_(session));
       ids.push(id);
     });
@@ -963,6 +1119,10 @@ const ACTIONS = {
     if (start && !isValidDateStr_(start)) return fail_('Invalid start date.');
     const rest = parseRestDay_(body.restDay);
     if (rest === null) return fail_('Choose a rest day from Sunday to Saturday.');
+    const teams = readTeams_();
+    const teamId = body.team == null || body.team === '' ? DEFAULT_TEAM : String(body.team);
+    const teamRow = teams.filter(function (t) { return t.id === teamId; })[0];
+    if (!teamRow) return fail_('Team not found.');
     const sheet = ensureSellersSheet_();
     if (findRow_(sheet, 1, name) !== -1) return fail_('A seller with that name already exists.');
 
@@ -977,9 +1137,10 @@ const ACTIONS = {
       const salt = makeSalt_();
       login = [username, hashPassword_(password, salt), salt];
     }
-    sheet.appendRow([name, Number(target) || 0].concat(login, [cat, start, '', rest]));
+    sheet.appendRow([name, Number(target) || 0].concat(login, [cat, start, '', rest, teamId]));
+    sheet.getRange(sheet.getLastRow(), 10).setNumberFormat('@').setValue(teamId);
     setSellerAssignment_(name, cat, target, session);
-    logAudit_('sellerCreated', 'Seller', name, '', 'category: ' + (cat || '—') + ', own plan: ' + (Number(target) || 'default') + (start ? ', starts ' + start : '') + (rest !== '' ? ', rests ' + REST_DAY_NAMES[rest] : '') + (username ? ', username: ' + username : ''), actor_(session));
+    logAudit_('sellerCreated', 'Seller', name, '', (teams.length > 1 ? 'team: ' + teamRow.name + ', ' : '') + 'category: ' + (cat || '—') + ', own plan: ' + (Number(target) || 'default') + (start ? ', starts ' + start : '') + (rest !== '' ? ', rests ' + REST_DAY_NAMES[rest] : '') + (username ? ', username: ' + username : ''), actor_(session));
     return jsonOutput_({ ok: true });
   },
 
@@ -997,7 +1158,7 @@ const ACTIONS = {
     sheet.getRange(row, 1).setValue(newName);
 
     let moved = 0;
-    [[ensureEntriesSheet_(), 2], [ensureActivitySheet_(), 2], [ensureCallTimeSheet_(), 2]].forEach(function (pair) {
+    [[ensureEntriesSheet_(), 2], [ensureActivitySheet_(), 2], [ensureCallTimeSheet_(), 2], [ensureLeadsSheet_(), 2]].forEach(function (pair) {
       const sh = pair[0], col = pair[1];
       const last = sh.getLastRow();
       if (last < 2) return;
@@ -1014,11 +1175,13 @@ const ACTIONS = {
         delete r.config.sellers[oldName];
         changed = true;
       }
-      const ts = Array.isArray(r.config.teamSellers) ? r.config.teamSellers : [];
-      if (ts.indexOf(oldName) !== -1) {
-        r.config.teamSellers = ts.map(function (n) { return n === oldName ? newName : n; });
-        changed = true;
-      }
+      eachSlot_(r.config, function (slot) {
+        const ts = Array.isArray(slot.teamSellers) ? slot.teamSellers : [];
+        if (ts.indexOf(oldName) !== -1) {
+          slot.teamSellers = ts.map(function (n) { return n === oldName ? newName : n; });
+          changed = true;
+        }
+      });
       if (changed) writePlanRow_(planSheet, r.row, r.month, r.config);
     });
     logAudit_('sellerRenamed', 'Seller', newName, oldName, newName + ' (' + moved + ' records updated)', actor_(session));
@@ -1031,7 +1194,26 @@ const ACTIONS = {
     const hasCat = body.category !== undefined && body.category !== null;
     const hasStart = body.startDate !== undefined && body.startDate !== null;
     const hasRest = body.restDay !== undefined && body.restDay !== null;
-    if (!hasTarget && !hasCat && !hasStart && !hasRest) return fail_('Nothing to change.');
+    const hasTeam = body.team !== undefined && body.team !== null && body.team !== '';
+    if (!hasTarget && !hasCat && !hasStart && !hasRest && !hasTeam) return fail_('Nothing to change.');
+    if (hasTeam) {
+      const teams = readTeams_();
+      const teamId = String(body.team);
+      const teamRow = teams.filter(function (t) { return t.id === teamId; })[0];
+      if (!teamRow) return fail_('Team not found.');
+      const tsheet = ensureSellersSheet_();
+      const trow = findRow_(tsheet, 1, body.name);
+      if (trow === -1) return fail_('Seller not found.');
+      const oldTeam = teamCell_(tsheet.getRange(trow, 10).getValue(), teams);
+      if (oldTeam !== teamId) {
+        tsheet.getRange(trow, 10).setNumberFormat('@').setValue(teamId);
+        // They leave the old team's plan sum from this month on; the new team adds them when it wants.
+        if (removeFromSums_(String(body.name))) syncConfigPlan_();
+        const oldName = (teams.filter(function (t) { return t.id === oldTeam; })[0] || {}).name || oldTeam;
+        logAudit_('sellerTeamChanged', 'Seller', body.name, oldName, teamRow.name, actor_(session));
+      }
+      if (!hasTarget && !hasCat && !hasStart && !hasRest) return jsonOutput_({ ok: true });
+    }
     const rest = hasRest ? parseRestDay_(body.restDay) : '';
     if (rest === null) return fail_('Choose a rest day from Sunday to Saturday.');
     if (hasTarget) { const err = validateTarget_(body.target); if (err) return fail_(err); }
@@ -1106,27 +1288,62 @@ const ACTIONS = {
     return jsonOutput_({ ok: true });
   },
 
+  /* ---- teams (admin) ---- */
+  addTeam: function (body, session) {
+    const name = String(body.name || '').trim();
+    if (!name) return fail_('Team name is required.');
+    if (name.length > 40) return fail_('Team name is too long.');
+    const teams = readTeams_();
+    if (teams.length >= MAX_TEAMS) return fail_('You can have at most ' + MAX_TEAMS + ' teams.');
+    if (teams.some(function (t) { return t.name.toLowerCase() === name.toLowerCase(); })) return fail_('A team with that name already exists.');
+    const id = String(teams.reduce(function (m, t) { return Math.max(m, Number(t.id) || 0); }, 0) + 1);
+    const sh = ensureTeamsSheet_();
+    const r = sh.getRange(sh.getLastRow() + 1, 1, 1, 2);
+    r.setNumberFormat('@');
+    r.setValues([[id, name]]);
+    logAudit_('teamCreated', 'Team', name, '', 'id ' + id, actor_(session));
+    return jsonOutput_({ ok: true, id: id });
+  },
+  renameTeam: function (body, session) {
+    const id = String(body.id || '');
+    const name = String(body.name || '').trim();
+    if (!name) return fail_('Team name is required.');
+    if (name.length > 40) return fail_('Team name is too long.');
+    const teams = readTeams_();
+    const team = teams.filter(function (t) { return t.id === id; })[0];
+    if (!team) return fail_('Team not found.');
+    if (teams.some(function (t) { return t.id !== id && t.name.toLowerCase() === name.toLowerCase(); })) return fail_('A team with that name already exists.');
+    if (team.name === name) return jsonOutput_({ ok: true });
+    const sh = ensureTeamsSheet_();
+    const row = findRow_(sh, 1, id);
+    if (row === -1) {
+      const r = sh.getRange(sh.getLastRow() + 1, 1, 1, 2); r.setNumberFormat('@'); r.setValues([[id, name]]);
+    } else sh.getRange(row, 2).setValue(name);
+    logAudit_('teamRenamed', 'Team', name, team.name, name, actor_(session));
+    return jsonOutput_({ ok: true });
+  },
+  deleteTeam: function (body, session) {
+    const id = String(body.id || '');
+    if (id === DEFAULT_TEAM) return fail_('The first team can’t be removed. Rename it instead.');
+    const teams = readTeams_();
+    const team = teams.filter(function (t) { return t.id === id; })[0];
+    if (!team) return fail_('Team not found.');
+    const teamOf = readSellerTeams_(teams);
+    const members = Object.keys(teamOf).filter(function (n) { return teamOf[n] === id; });
+    if (members.length) return fail_(team.name + ' still has ' + members.length + ' seller(s). Move them to another team first.');
+    const sh = ensureTeamsSheet_();
+    const row = findRow_(sh, 1, id);
+    if (row !== -1) sh.deleteRow(row);
+    logAudit_('teamDeleted', 'Team', team.name, 'id ' + id, '', actor_(session));
+    return jsonOutput_({ ok: true });
+  },
+
   deleteSeller: function (body, session) {
     const sheet = ensureSellersSheet_();
     const row = findRow_(sheet, 1, body.name);
     if (row === -1) return fail_('Seller not found.');
     sheet.deleteRow(row);
-    // Take them out of this month's (and planned months') team plan sum.
-    // Past months keep their plan as it was.
-    const month = currentMonth_();
-    const rows = readPlanRows_();
-    const inSum = function (cfg) { return isSumMode_(cfg) && (cfg.teamSellers || []).indexOf(body.name) !== -1; };
-    if (inSum(effectiveFrom_(rows, month))) {
-      updateMonthConfig_(month, function (cfg) { cfg.teamSellers = cfg.teamSellers.filter(function (n) { return n !== body.name; }); });
-    }
-    const planSheet = ensurePlanConfigSheet_();
-    readPlanRows_().forEach(function (r) {
-      if (r.month > month && inSum(r.config)) {
-        r.config.teamSellers = r.config.teamSellers.filter(function (n) { return n !== body.name; });
-        writePlanRow_(planSheet, r.row, r.month, r.config);
-      }
-    });
-    if (rows.length) syncConfigPlan_();
+    if (removeFromSums_(body.name)) syncConfigPlan_();
     logAudit_('sellerDeleted', 'Seller', body.name, 'removed from roster', '', actor_(session));
     return jsonOutput_({ ok: true });
   },
@@ -1179,9 +1396,18 @@ const ACTIONS = {
     if (hasCall && (!isNonNegativeNumber_(body.callMinutes) || Number(body.callMinutes) > MAX_CALL_MINUTES || Math.floor(Number(body.callMinutes)) !== Number(body.callMinutes))) {
       return fail_('Call time must be between 0:00 and 24:00.');
     }
+    // Leads taken / contacted for the day (RNP). Send both or neither.
+    const hasLeads = (body.leadsTaken !== undefined && body.leadsTaken !== null && body.leadsTaken !== '')
+      || (body.leadsContacted !== undefined && body.leadsContacted !== null && body.leadsContacted !== '');
+    const leadNum = function (v) { return v === undefined || v === null || v === '' ? 0 : v; };
+    if (hasLeads) {
+      const lt = leadNum(body.leadsTaken), lc = leadNum(body.leadsContacted);
+      const okInt = function (v) { return isNonNegativeNumber_(v) && Math.floor(Number(v)) === Number(v) && Number(v) <= MAX_LEADS; };
+      if (!okInt(lt) || !okInt(lc)) return fail_('Leads must be whole numbers, 0 or more.');
+    }
     const values = body.values == null ? {} : body.values;
     if (typeof values !== 'object' || Array.isArray(values)) return fail_('No values provided.');
-    if (!hasCall && !Object.keys(values).length) return fail_('No values provided.');
+    if (!hasCall && !hasLeads && !Object.keys(values).length) return fail_('No values provided.');
 
     const known = {};
     const stSheet = ensureStandardsSheet_();
@@ -1228,10 +1454,26 @@ const ACTIONS = {
       else cSheet.appendRow([body.date, seller, callSaved]);
     }
 
-    if (!Object.keys(saved).length && callSaved === null) return fail_('No valid values to save.');
-    const logged = callSaved === null ? saved : Object.assign({}, saved, { callMinutes: callSaved });
+    let leadsSaved = null;
+    if (hasLeads) {
+      const lSheet = ensureLeadsSheet_();
+      const lLast = lSheet.getLastRow();
+      const lRows = lLast > 1 ? lSheet.getRange(2, 1, lLast - 1, 2).getValues() : [];
+      let lRow = -1;
+      for (let i = 0; i < lRows.length; i++) {
+        if (formatDate_(lRows[i][0]) === body.date && String(lRows[i][1]) === seller) { lRow = i + 2; break; }
+      }
+      leadsSaved = { taken: Number(leadNum(body.leadsTaken)), contacted: Number(leadNum(body.leadsContacted)) };
+      if (lRow !== -1) lSheet.getRange(lRow, 3, 1, 2).setValues([[leadsSaved.taken, leadsSaved.contacted]]);
+      else lSheet.appendRow([body.date, seller, leadsSaved.taken, leadsSaved.contacted]);
+    }
+
+    if (!Object.keys(saved).length && callSaved === null && leadsSaved === null) return fail_('No valid values to save.');
+    const logged = Object.assign({}, saved);
+    if (callSaved !== null) logged.callMinutes = callSaved;
+    if (leadsSaved) { logged.leadsTaken = leadsSaved.taken; logged.leadsContacted = leadsSaved.contacted; }
     logAudit_('activityLogged', 'Activity', seller + ' / ' + body.date, '', JSON.stringify(logged), actor_(session));
-    return jsonOutput_({ ok: true, saved: saved, skipped: skipped, callMinutes: callSaved });
+    return jsonOutput_({ ok: true, saved: saved, skipped: skipped, callMinutes: callSaved, leads: leadsSaved });
   },
 };
 

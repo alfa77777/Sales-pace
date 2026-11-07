@@ -11,6 +11,8 @@ Sales tracking and payroll dashboard for the Englify sales team. Sellers log dai
 - **Payroll** — category-based commission tiers (C · Demo class, Other · G/O/A/B), fixed pay, team-leader bonus, mid-month hire proration.
 - **Call time & daily standards** — calendar view and compliance tracking.
 - **Weekly rest day** — one rest weekday per seller; daily targets, pace and forecasts count working days only.
+- **Multiple teams** — one admin, many teams; each team has its own plan, dashboard and leader bonus, with an "All teams" overview.
+- **RNP report** — sellers by class with pace icons, daily / weekly table by product and payment method, leads and conversion, like the ERP RNP page.
 - **Admin** — manage sellers, plans, bulk sales entry, and open any seller's workspace; deactivate sellers who leave (history and last-month pay kept) or reactivate them.
 - **Logins** — per-seller accounts with signed 7-day session tokens.
 

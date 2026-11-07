@@ -1002,3 +1002,58 @@ td .sub-line{ margin-top: 4px; font-size: var(--text-xs); font-weight: 500; }
 .seg-btn:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
 .view-switch-hint{ margin: 0 !important; }
 @media (max-width: 640px){ .view-switch-hint{ flex-basis: 100%; } }
+
+/* ---------- teams ---------- */
+.team-tabs{ display: flex; gap: 6px; flex-wrap: wrap; margin: calc(-1 * var(--sp-2)) 0 var(--sp-5); }
+.team-tab{
+  appearance: none; font: inherit; font-weight: 700; font-size: var(--text-sm); cursor: pointer;
+  padding: 8px 14px; min-height: 38px; border-radius: var(--r-pill);
+  background: var(--surface); color: var(--ink-soft); border: 1px solid var(--border-strong);
+  transition: background .15s var(--ease), color .15s var(--ease), border-color .15s var(--ease);
+}
+.team-tab .num{ font-weight: 600; color: var(--ink-faint); }
+.team-tab:hover{ color: var(--ink); border-color: var(--ink-faint); }
+.team-tab.active{ background: var(--brand); border-color: var(--brand); color: #fff; }
+.team-tab.active .num{ color: rgba(255,255,255,.8); }
+.team-tab:focus-visible{ outline: 2px solid var(--accent); outline-offset: 2px; }
+.pill.team-pill{ background: var(--accent-bg); color: var(--accent-text); }
+.sub-line{ font-size: var(--text-xs); margin-top: 2px; }
+
+/* ---------- RNP ---------- */
+.rnp-group{ padding: var(--sp-3) 0; border-top: 1px solid var(--border); }
+.rnp-group:first-of-type{ border-top: 0; padding-top: 0; }
+.rnp-group-label{ font-size: 11px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: var(--sp-2); }
+.rnp-chips{ display: flex; flex-wrap: wrap; gap: 6px; }
+.rnp-chip{
+  appearance: none; font: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 10px; border-radius: var(--r-md); background: var(--surface-2); color: var(--ink-soft);
+  border: 1px solid var(--border); font-size: var(--text-sm); font-weight: 600; min-height: 36px;
+  transition: border-color .15s var(--ease), transform .15s var(--ease);
+}
+.rnp-chip:hover{ border-color: var(--border-strong); color: var(--ink); }
+.rnp-chip.big{ padding: 9px 14px; font-size: var(--text-md); color: var(--ink); background: var(--accent-bg); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.rnp-chip.sel{ outline: 2px solid var(--brand); outline-offset: 1px; }
+.rnp-chip .rnp-pct{ color: var(--ink-faint); font-weight: 700; }
+.rnp-chip.big .rnp-pct{ color: var(--accent-text); }
+.rnp-chip .rnp-ico{ font-size: 1.15em; line-height: 1; }
+.pill.cls-none{ background: var(--surface-3); color: var(--ink-faint); }
+.rnp-card-grid{ display: grid; grid-template-columns: minmax(0, 340px) minmax(0, 1fr); gap: var(--sp-4); align-items: start; }
+.rnp-card-grid .card{ margin: 0; box-shadow: none; }
+table.kv th{ position: static; text-transform: none; letter-spacing: 0; font-size: var(--text-sm); color: var(--ink-soft); font-weight: 600; background: none; }
+table.kv td{ text-align: right; }
+.rnp-wrap{ margin: 0; border: 1px solid var(--border); border-radius: var(--r-md); }
+table.rnp-table{ font-size: var(--text-sm); }
+table.rnp-table th, table.rnp-table td{ white-space: nowrap; padding: 8px 12px; }
+table.rnp-table td{ text-align: right; }
+table.rnp-table thead th{ text-align: right; }
+table.rnp-table thead th:first-child, table.rnp-table tbody th[scope="row"]{
+  position: sticky; left: 0; z-index: 2; background: var(--surface); text-align: left;
+  text-transform: none; letter-spacing: 0; font-size: var(--text-sm); font-weight: 600; color: var(--ink); border-right: 1px solid var(--border);
+}
+table.rnp-table thead th:first-child{ z-index: 3; }
+table.rnp-table .rnp-total{ background: var(--surface-2); font-weight: 700; }
+table.rnp-table tr.rnp-group-row th{
+  position: sticky; left: 0; background: var(--surface-3); color: var(--ink-faint); font-size: 11px; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase; text-align: left;
+}
+@media (max-width: 860px){ .rnp-card-grid{ grid-template-columns: 1fr; } }

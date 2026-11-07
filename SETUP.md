@@ -5,10 +5,12 @@ This folder has two parts:
 - `site/` — the website. Upload it to Netlify.
 - `Code.gs` — the backend. Paste it into Apps Script.
 
-Your existing logins, sales, standards and audit log keep working. The update adds new columns and two new tabs by itself:
+Your existing logins, sales, standards and audit log keep working. The update adds new columns and tabs by itself the first time the app loads. Don't type into them by hand:
 
-- **Sellers → Category** (column F), **StartDate** (column G) and **EndDate** (column H, filled when you deactivate someone) and **RestDay** (column I, 0 = Sunday … 6 = Saturday)
-- **Entries → Class** (column E)
+- **Sellers → Category** (F), **StartDate** (G), **EndDate** (H, filled when you deactivate someone), **RestDay** (I, 0 = Sunday … 6 = Saturday) and **Team** (J, the team's Id)
+- **Entries → Class** (E), **Product** (F) and **Payment** (G)
+- **Teams** tab: Id and name of each team. Team 1 is created for everyone you already have.
+- **Leads** tab: leads taken and contacted per seller per day (for RNP)
 - **CallTime** tab: call time per seller per day, in minutes
 - **PlanConfig** tab: pay rules per month. Don't edit it by hand.
 
@@ -75,6 +77,8 @@ Old personal targets are **not** used anymore. Plans now come from each seller's
 8. Optional: under **Team plan is**, choose **Sum of selected sellers** and tick the sellers whose plans make the team plan. Only ticked sellers' sales count toward the team plan, its % and the 10-day reward milestones. Unticked sellers show as **Extra**: their sales appear separately as "+X extra". The team leader bonus still counts all sales.
 9. When someone leaves: open their workspace → **Account** → **Deactivate**, and pick their last working day. They disappear from the team and can't log in, their sales stay, and their last month's plan counts only the days they worked. To bring them back: **Team → Show: Deactivated → Reactivate**.
 10. Set each seller's **Weekly rest day** in their workspace → **Account** (or when adding a seller). Their daily targets then count only working days. On the rest day no standards are expected, and it never counts as a day without sales. A sale on a rest day still counts.
+11. **Teams** (optional): open **Settings → Teams**, add your teams, then move each seller in their workspace → **Account → Team**. Each team gets its own plan, leader plan and leader bonus in **Settings → Plans & pay** (pick the team at the top). With one team nothing changes on screen.
+12. **RNP**: from now on every sale records a **product** and a **payment method**, and sellers type **leads taken / contacted** on **Daily standards**. Sales logged before this update show as "Product not set" in RNP.
 
 ## 8. Check it works
 
