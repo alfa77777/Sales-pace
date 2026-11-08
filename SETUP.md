@@ -79,6 +79,7 @@ Old personal targets are **not** used anymore. Plans now come from each seller's
 10. Set each seller's **Weekly rest day** in their workspace → **Account** (or when adding a seller). Their daily targets then count only working days. On the rest day no standards are expected, and it never counts as a day without sales. A sale on a rest day still counts.
 11. **Teams** (optional): open **Settings → Teams**, add your teams, then move each seller in their workspace → **Account → Team**. Each team gets its own plan, leader plan and leader bonus in **Settings → Plans & pay** (pick the team at the top). With one team nothing changes on screen.
 12. **RNP**: from now on every sale records a **product** and a **payment method**, and sellers type **leads taken / contacted** on **Daily standards**. Sales logged before this update show as "Product not set" in RNP.
+13. **Team leaders**: open the leader's workspace → **Account → Role** and tick **Team leader of [team]**. Give them a login on the same tab. A leader keeps their own sales and pay, and also sees their team's **Team**, **Entries**, **Salaries**, **Compliance** and **RNP** pages. They can add, fix or remove their team's sales, leads and call time. Plans, pay rules, sellers and logins stay admin-only. (Sheet: **Sellers** column K **Role** = `leader`.)
 
 ## 8. Check it works
 

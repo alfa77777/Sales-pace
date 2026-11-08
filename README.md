@@ -14,6 +14,7 @@ Sales tracking and payroll dashboard for the Englify sales team. Sellers log dai
 - **Multiple teams** — one admin, many teams; each team has its own plan, dashboard and leader bonus, with an "All teams" overview.
 - **RNP report** — sellers by class with pace icons, daily / weekly table by product and payment method, leads and conversion, like the ERP RNP page.
 - **Admin** — manage sellers, plans, bulk sales entry, and open any seller's workspace; deactivate sellers who leave (history and last-month pay kept) or reactivate them.
+- **Team leaders** — a seller marked as leader also sees and manages their own team (sales, leads, call time, RNP, compliance, salaries); plans, pay rules and sellers stay admin-only.
 - **Logins** — per-seller accounts with signed 7-day session tokens.
 
 ## Structure

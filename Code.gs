@@ -10,9 +10,11 @@
  *
  * TABS (created automatically when missing)
  *   Config    A1 "Monthly Plan", B1 = all teams' plan this month (kept in sync; PlanConfig is the source)
- *   Sellers   Name | Target | Username | PasswordHash | Salt | Category | StartDate | EndDate | RestDay | Team
+ *   Sellers   Name | Target | Username | PasswordHash | Salt | Category | StartDate | EndDate | RestDay | Team | Role
  *             (Target = this seller's own plan, 0 = the category's default;
- *              Category = C or OTHER. Shown for reading — PlanConfig is the source)
+ *              Category = C or OTHER. Shown for reading — PlanConfig is the source;
+ *              Role = "leader" for a team leader: sells, and manages their team's
+ *              sales, leads and call time. Empty = seller)
  *   Entries   Date | Seller | Amount | ID | Class | Product | Payment
  *             (Class: C, G, O, A or B; Product and Payment from the RNP lists)
  *   PlanConfig Month | Config   one JSON row per month that has its own pay rules:
@@ -62,7 +64,7 @@ const BAD_LOGIN = 'Incorrect username or password.';
 const PUBLIC_ACTIONS = { login: true, setupAdmin: true };
 const MAX_BULK_ROWS = 200;
 const ADMIN_ACTIONS = {
-  setPlan: true, savePayConfig: true, addEntriesBulk: true,
+  setPlan: true, savePayConfig: true, setLeader: true,
   addSeller: true, updateSeller: true, deactivateSeller: true, reactivateSeller: true, renameSeller: true, deleteSeller: true, setSellerCredentials: true,
   addStandard: true, updateStandard: true, deleteStandard: true,
   addTeam: true, renameTeam: true, deleteTeam: true,
@@ -133,7 +135,9 @@ function ensureSellersSheet_()   {
   // RestDay: weekly day off, 0 = Sunday … 6 = Saturday (empty = none).
   ensureHeader_(sh, 9, 'RestDay');
   // Team: the team's Id from the Teams tab (empty = the first team, "1").
-  return ensureHeader_(sh, 10, 'Team');
+  ensureHeader_(sh, 10, 'Team');
+  // Role: "leader" = team leader (sells, plus manages their own team). Empty = seller.
+  return ensureHeader_(sh, 11, 'Role');
 }
 /* Teams tab: Id, Name. The first team (Id 1) always exists; it holds everyone
    who was on the team before teams were added. */
@@ -575,10 +579,13 @@ function readSession_(token) {
   const sheet = ensureSellersSheet_();
   const row = findRow_(sheet, 1, p.n);
   if (row === -1) return null;
-  const vals = sheet.getRange(row, 1, 1, 8).getValues()[0];
+  const vals = sheet.getRange(row, 1, 1, 11).getValues()[0];
   if (!vals[2] || versionOf_(vals[4]) !== p.v) return null;
   if (cellDate_(vals[7])) return null; // deactivated: every open session stops at once
-  return { role: 'seller', name: String(p.n) };
+  const out = { role: 'seller', name: String(p.n) };
+  // Team leaders: read on every request, so the admin's change applies at once.
+  if (isLeaderCell_(vals[10])) out.leader = teamCell_(vals[9], readTeams_());
+  return out;
 }
 function sessionResponse_(role, name, salt, extra) {
   const exp = Date.now() + SESSION_MS;
@@ -586,7 +593,30 @@ function sessionResponse_(role, name, salt, extra) {
   if (extra) Object.keys(extra).forEach(function (k) { out[k] = extra[k]; });
   return jsonOutput_(out);
 }
-function actor_(session) { return session ? session.role + ':' + session.name : 'system'; }
+function actor_(session) { return session ? (session.leader ? 'leader' : session.role) + ':' + session.name : 'system'; }
+function isLeaderCell_(v) { return String(v || '').trim().toLowerCase() === 'leader'; }
+/* Team of a seller by name ('' if unknown). */
+function sellerTeamOf_(name) {
+  const sheet = ensureSellersSheet_();
+  const row = findRow_(sheet, 1, String(name || ''));
+  if (row === -1) return '';
+  return teamCell_(sheet.getRange(row, 10).getValue(), readTeams_());
+}
+/* May this session record/change data for this seller?
+   Admin: anyone. Team leader: anyone in their own team. Seller: only themselves. */
+function canActFor_(session, seller) {
+  if (!session) return false;
+  if (session.role === 'admin') return true;
+  if (String(seller) === session.name) return true;
+  return !!session.leader && sellerTeamOf_(seller) === session.leader;
+}
+/* Seller named in the request: sellers always act for themselves; admin and
+   leaders name the seller (a leader defaults to themselves). */
+function targetSeller_(body, session) {
+  if (session.role === 'admin') return String(body.seller || '').trim();
+  if (session.leader) return String(body.seller || '').trim() || session.name;
+  return session.name;
+}
 
 /* ---------- audit log ---------- */
 
@@ -646,10 +676,11 @@ function doGet(e) {
   const sellers = [];
   const sellersSheet = ensureSellersSheet_();
   if (sellersSheet.getLastRow() > 1) {
-    sellersSheet.getRange(2, 1, sellersSheet.getLastRow() - 1, 10).getValues().forEach(function (row) {
+    sellersSheet.getRange(2, 1, sellersSheet.getLastRow() - 1, 11).getValues().forEach(function (row) {
       if (row[0] === '') return;
       const a = (current.sellers || {})[String(row[0])] || { cat: '', plan: 0 };
       const s = { name: String(row[0]), hasLogin: !!row[2], team: teamCell_(row[9], teams) };
+      if (isLeaderCell_(row[10])) s.leader = true;
       dates.start[s.name] = cellDate_(row[6]);
       dates.end[s.name] = cellDate_(row[7]);
       // Deactivated sellers: everyone sees the month they left (to hide them
@@ -680,13 +711,15 @@ function doGet(e) {
   }
 
   const leads = [];
+  const teamOfSeller = {};
+  sellers.forEach(function (s) { teamOfSeller[s.name] = s.team; });
   if (session) {
     const leadSheet = ensureLeadsSheet_();
     if (leadSheet.getLastRow() > 1) {
       leadSheet.getRange(2, 1, leadSheet.getLastRow() - 1, 4).getValues().forEach(function (row) {
         if (row[0] === '' || row[1] === '') return;
         const ld = { date: formatDate_(row[0]), seller: String(row[1]), taken: Number(row[2]) || 0, contacted: Number(row[3]) || 0 };
-        if (isAdmin || ld.seller === session.name) leads.push(ld);
+        if (isAdmin || ld.seller === session.name || (session.leader && teamOfSeller[ld.seller] === session.leader)) leads.push(ld);
       });
     }
   }
@@ -828,7 +861,10 @@ const ACTIONS = {
       const s = sellersSheet.getRange(sRow, 1, 1, 8).getValues()[0];
       if (!verifyPassword_(password, s[4], s[3])) return fail_(BAD_LOGIN);
       if (cellDate_(s[7])) return fail_('This account is deactivated. Ask your team leader.');
-      return sessionResponse_('seller', String(s[0]), s[4], { target: Number(s[1]) || 0 });
+      const lead = sellersSheet.getRange(sRow, 10, 1, 2).getValues()[0];
+      const extra = { target: Number(s[1]) || 0 };
+      if (isLeaderCell_(lead[1])) extra.leader = teamCell_(lead[0], readTeams_());
+      return sessionResponse_('seller', String(s[0]), s[4], extra);
     }
     return fail_(BAD_LOGIN);
   },
@@ -992,8 +1028,9 @@ const ACTIONS = {
   /* ---- entries ---- */
 
   addEntry: function (body, session) {
-    const seller = session.role === 'seller' ? session.name : String(body.seller || '').trim();
+    const seller = targetSeller_(body, session);
     if (!seller) return fail_('Choose a seller.');
+    if (!canActFor_(session, seller)) return fail_('You can only add sales for your own team.');
     const err = validateSale_(body.date, body.amount);
     if (err) return fail_(err);
     const cls = body.cls == null || body.cls === '' ? '' : String(body.cls);
@@ -1031,13 +1068,14 @@ const ACTIONS = {
     const row = findEntryRow_(sheet, body.id);
     if (row === -1) return fail_('That entry no longer exists. Refresh and try again.');
     const vals = sheet.getRange(row, 1, 1, 7).getValues()[0];
-    if (session.role === 'seller' && String(vals[1]) !== session.name) return fail_('You can only edit your own entries.');
+    if (!canActFor_(session, String(vals[1]))) return fail_(session.leader ? 'You can only edit sales of your own team.' : 'You can only edit your own entries.');
 
     let seller = String(vals[1]);
     if (hasSeller) {
-      if (session.role !== 'admin') return fail_('Only the admin can move a sale to another seller.');
+      if (session.role !== 'admin' && !session.leader) return fail_('Only the admin can move a sale to another seller.');
       seller = String(body.seller).trim();
       if (!seller || findRow_(ensureSellersSheet_(), 1, seller) === -1) return fail_('Unknown seller.');
+      if (!canActFor_(session, seller)) return fail_('You can only move sales within your own team.');
     }
     const date = hasDate ? body.date : formatDate_(vals[0]);
     if (hasDate || hasSeller) { const endErr = afterEndError_(seller, date); if (endErr) return fail_(endErr); }
@@ -1057,6 +1095,7 @@ const ACTIONS = {
   /* Admin: add several sales for one date in a single request.
      body.rows = [{ seller, amount }, ...]. All rows are checked before anything is written. */
   addEntriesBulk: function (body, session) {
+    if (session.role !== 'admin' && !session.leader) return fail_('Only the admin can do that.');
     const err = isValidDateStr_(body.date) ? null : 'Invalid date.';
     if (err) return fail_(err);
     if (body.date > dateOffsetStr_(1)) return fail_('Sales can’t be logged for a future date.');
@@ -1070,6 +1109,7 @@ const ACTIONS = {
       const seller = String(r.seller || '').trim();
       if (!seller || findRow_(sellersSheet, 1, seller) === -1) return fail_('Unknown seller: ' + (seller || '(blank)') + '.');
       if (seen[seller]) return fail_(seller + ' appears twice. Combine the amounts into one row.');
+      if (!canActFor_(session, seller)) return fail_(seller + ' is not in your team.');
       const endErr = afterEndError_(seller, body.date);
       if (endErr) return fail_(endErr);
       seen[seller] = true;
@@ -1098,7 +1138,7 @@ const ACTIONS = {
     const row = findEntryRow_(sheet, body.id);
     if (row === -1) return fail_('That entry no longer exists. Refresh and try again.');
     const vals = sheet.getRange(row, 1, 1, 4).getValues()[0];
-    if (session.role === 'seller' && String(vals[1]) !== session.name) return fail_('You can only delete your own entries.');
+    if (!canActFor_(session, String(vals[1]))) return fail_(session.leader ? 'You can only delete sales of your own team.' : 'You can only delete your own entries.');
     sheet.deleteRow(row);
     logAudit_('saleDeleted', 'Entry', body.id, vals[1] + ' / ' + formatDate_(vals[0]) + ' / ' + vals[2], '', actor_(session));
     return jsonOutput_({ ok: true });
@@ -1186,6 +1226,21 @@ const ACTIONS = {
     });
     logAudit_('sellerRenamed', 'Seller', newName, oldName, newName + ' (' + moved + ' records updated)', actor_(session));
     return jsonOutput_({ ok: true, updated: moved });
+  },
+
+  /* Admin: make a seller their team's leader (body.leader = true) or a plain seller again.
+     A leader keeps their own sales and pay, and can also see and manage the
+     sales, leads and call time of their own team. Applies on their next request. */
+  setLeader: function (body, session) {
+    const sheet = ensureSellersSheet_();
+    const row = findRow_(sheet, 1, body.name);
+    if (row === -1) return fail_('Seller not found.');
+    const on = body.leader === true || body.leader === 'true';
+    const old = isLeaderCell_(sheet.getRange(row, 11).getValue());
+    if (old === on) return jsonOutput_({ ok: true });
+    sheet.getRange(row, 11).setValue(on ? 'leader' : '');
+    logAudit_('sellerRoleChanged', 'Seller', body.name, old ? 'team leader' : 'seller', on ? 'team leader' : 'seller', actor_(session));
+    return jsonOutput_({ ok: true });
   },
 
   /* Admin: a seller's category and/or own plan (0 = category default), from this month on. */
@@ -1389,9 +1444,10 @@ const ACTIONS = {
   logActivity: function (body, session) {
     if (!isValidDateStr_(body.date)) return fail_('Invalid date.');
     if (body.date > dateOffsetStr_(1)) return fail_('Activity can’t be logged for a future date.');
-    const seller = session.role === 'seller' ? session.name : String(body.seller || '').trim();
+    const seller = targetSeller_(body, session);
     if (!seller) return fail_('Choose a seller.');
     if (findRow_(ensureSellersSheet_(), 1, seller) === -1) return fail_('Unknown seller.');
+    if (!canActFor_(session, seller)) return fail_('You can only log activity for your own team.');
     const hasCall = body.callMinutes !== undefined && body.callMinutes !== null && body.callMinutes !== '';
     if (hasCall && (!isNonNegativeNumber_(body.callMinutes) || Number(body.callMinutes) > MAX_CALL_MINUTES || Math.floor(Number(body.callMinutes)) !== Number(body.callMinutes))) {
       return fail_('Call time must be between 0:00 and 24:00.');

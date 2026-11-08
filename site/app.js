@@ -488,6 +488,17 @@ function saveSession(s){ storeSet(SESSION_KEY, JSON.stringify(s)); }
 function clearSession(){ storeDel(SESSION_KEY); }
 function isAdmin(){ return !!session && session.role === 'admin'; }
 function isSeller(){ return !!session && session.role === 'seller'; }
+/* Team leader: a seller who also manages their own team (its sales, leads, call time). */
+function isLeader(){ return isSeller() && !!session.leader; }
+/* Admin or team leader: may open the team pages. */
+function isManager(){ return isAdmin() || isLeader(); }
+/* May the current user record or change data for this seller? */
+function canManage(name){
+  if (isAdmin()) return true;
+  if (!isSeller()) return false;
+  if (name === session.name) return true;
+  return isLeader() && teamOfName(name) === session.leader;
+}
 function endSession(message){
   session = null;
   clearSession();
@@ -534,7 +545,7 @@ async function apiPost(payload, requestId){
 
 function applyData(d){
   data.plan = Number(d.plan) || 0;
-  data.sellers = (d.sellers || []).map(s => ({ name: String(s.name), hasLogin: !!s.hasLogin, username: s.username || '', startDate: isDateStr(s.startDate || '') ? s.startDate : '', endDate: isDateStr(s.endDate || '') ? s.endDate : '', endMonth: /^\d{4}-\d{2}$/.test(s.endMonth || '') ? s.endMonth : '', restDay: validRestDow(s.restDay), team: String(s.team || '1') }));
+  data.sellers = (d.sellers || []).map(s => ({ name: String(s.name), hasLogin: !!s.hasLogin, username: s.username || '', startDate: isDateStr(s.startDate || '') ? s.startDate : '', endDate: isDateStr(s.endDate || '') ? s.endDate : '', endMonth: /^\d{4}-\d{2}$/.test(s.endMonth || '') ? s.endMonth : '', restDay: validRestDow(s.restDay), team: String(s.team || '1'), leader: !!s.leader }));
   data.products = Array.isArray(d.products) && d.products.length ? d.products.map(String) : PRODUCTS_DEFAULT;
   data.payments = Array.isArray(d.payments) && d.payments.length ? d.payments.map(String) : PAYMENTS_DEFAULT;
   data.entries = (d.entries || []).map(e => ({
@@ -588,6 +599,9 @@ async function load(silent){
         if (d.me && d.me.role){
           session.role = d.me.role;
           session.name = d.me.name;
+          session.leader = d.me.leader || '';
+          // The admin may have just made this seller a leader (or not): fix the page.
+          if (!canAccess(route.name)) setTimeout(() => navigate(homeFor()), 0);
           saveSession(session);
         } else {
           endSession(t('Your session has ended. Please log in again.'));
@@ -678,12 +692,12 @@ const ROUTES = {
   mysales:     { access: 'seller', icon: 'chart',    label: 'My sales & pay' },
   myentries:   { access: 'seller', icon: 'receipt',  label: 'My entries' },
   standards:   { access: 'seller', icon: 'check',    label: 'Daily standards' },
-  entries:     { access: 'admin',  icon: 'receipt',  label: 'Entries' },
-  team:        { access: 'admin',  icon: 'users',    label: 'Team' },
-  salaries:    { access: 'admin',  icon: 'wallet',   label: 'Salaries' },
-  seller:      { access: 'admin',  icon: 'user',     label: 'Seller workspace' },
-  compliance:  { access: 'admin',  icon: 'check',    label: 'Compliance' },
-  rnp:         { access: 'admin',  icon: 'table',    label: 'RNP' },
+  entries:     { access: 'manager', icon: 'receipt',  label: 'Entries' },
+  team:        { access: 'manager', icon: 'users',    label: 'Team' },
+  salaries:    { access: 'manager', icon: 'wallet',   label: 'Salaries' },
+  seller:      { access: 'manager', icon: 'user',     label: 'Seller workspace' },
+  compliance:  { access: 'manager', icon: 'check',    label: 'Compliance' },
+  rnp:         { access: 'manager', icon: 'table',    label: 'RNP' },
   settings:    { access: 'user',   icon: 'settings', label: 'Settings' },
   login:       { access: 'guest',  icon: 'login',    label: 'Log in' },
 };
@@ -719,6 +733,7 @@ function canAccess(name){
   if (a === 'guest') return !session;
   if (!session) return false;
   if (a === 'user') return true;
+  if (a === 'manager') return isManager();
   return session.role === a;
 }
 function homeFor(){ return isSeller() ? 'mysales' : 'dashboard'; }
@@ -765,6 +780,7 @@ function toggleSidebar(force){
 
 function navItemsFor(){
   if (!session) return ['dashboard', 'leaderboard'];
+  if (isLeader()) return ['dashboard', 'leaderboard', 'mysales', 'myentries', 'standards', 'team', 'entries', 'salaries', 'compliance', 'rnp', 'settings'];
   if (session.role === 'seller') return ['dashboard', 'leaderboard', 'mysales', 'myentries', 'standards', 'settings'];
   return ['dashboard', 'leaderboard', 'entries', 'team', 'salaries', 'compliance', 'rnp', 'settings'];
 }
@@ -910,7 +926,7 @@ function renderSidebar(){
     return `<a class="nav-item ${active ? 'active' : ''}" href="${hrefFor(r)}" ${active ? 'aria-current="page"' : ''}>${icon(ROUTES[r].icon)}<span>${esc(t(ROUTES[r].label))}</span></a>`;
   }).join('');
   let workspaces = '';
-  if (isAdmin() && loaded && activeSellers().length){
+  if (isManager() && loaded && activeSellers().length){
     const risks = teamRisks();
     workspaces = `
       <div class="nav-label">${esc(t('Seller workspaces'))}${multiTeam() ? ' · ' + esc(teamName(curTeam())) : ''}</div>
@@ -929,7 +945,7 @@ function renderSidebar(){
       <span class="avatar ${isAdmin() ? 'admin' : ''}">${esc(initial(session.name))}</span>
       <div class="who">
         <div class="who-name">${esc(session.name)}</div>
-        <div class="who-role">${esc(isAdmin() ? t('Team leader') : t('Seller'))}</div>
+        <div class="who-role">${esc(isAdmin() ? t('Admin') : isLeader() ? t('Team leader') + ' · ' + teamName(session.leader) : t('Seller'))}</div>
       </div>
       <button type="button" class="icon-btn" onclick="logOut()" aria-label="${esc(t('Log out'))}" title="${esc(t('Log out'))}">${icon('logout')}</button>
     </div>` : `<a class="btn btn-block" href="${hrefFor('login')}">${icon('login')}<span>${esc(t('Log in'))}</span></a>`;
@@ -968,7 +984,7 @@ function renderTopbar(){
       <a class="user-chip" href="${hrefFor('settings')}" title="${esc(t('Account settings'))}">
         <span class="avatar sm ${isAdmin() ? 'admin' : ''}">${esc(initial(session.name))}</span>
         <span class="chip-name">${esc(session.name)}</span>
-        <span class="pill ${isAdmin() ? 'role-admin' : 'role-seller'}">${esc(isAdmin() ? t('Admin') : t('Seller'))}</span>
+        <span class="pill ${isAdmin() ? 'role-admin' : isLeader() ? 'role-leader' : 'role-seller'}">${esc(isAdmin() ? t('Admin') : isLeader() ? t('Leader') : t('Seller'))}</span>
       </a>`
     : (route.name === 'login' ? '' : `<a class="btn btn-sm" href="${hrefFor('login')}">${icon('login')}<span>${esc(t('Log in'))}</span></a>`);
   return `
@@ -987,6 +1003,7 @@ function renderTopbar(){
 function renderBottomNav(){
   let items;
   if (!session) items = ['dashboard', 'leaderboard', 'login'];
+  else if (isLeader()) items = ['mysales', 'team', 'add', 'entries', 'more'];
   else if (isSeller()) items = ['dashboard', 'mysales', 'add', 'myentries', 'more'];
   else items = ['dashboard', 'salaries', 'add', 'entries', 'more'];
   return `<nav class="bottom-nav" aria-label="${esc(t('Quick navigation'))}">${items.map(it => {
@@ -1049,13 +1066,13 @@ function paceTone(status){ return { good: 'ok', warn: 'needsattention', bad: 'cr
 function sellerSelect(id, selected, cls, placeholder, extra){
   return `<select id="${id}" class="${cls || ''}" ${extra || ''}>
     ${placeholder ? `<option value="">${esc(placeholder)}</option>` : ''}
-    ${data.sellers.filter(s => !isDeactivated(s) || s.name === selected).map(s => `<option value="${esc(s.name)}" ${s.name === selected ? 'selected' : ''}>${esc(s.name)}${isDeactivated(s) ? ' · ' + esc(t('Deactivated')) : ''}</option>`).join('')}
+    ${data.sellers.filter(s => (!isDeactivated(s) || s.name === selected) && (!isLeader() || canManage(s.name))).map(s => `<option value="${esc(s.name)}" ${s.name === selected ? 'selected' : ''}>${esc(s.name)}${isDeactivated(s) ? ' · ' + esc(t('Deactivated')) : ''}</option>`).join('')}
   </select>`;
 }
 function personCell(name, opts){
   opts = opts || {};
   const inner = `<span class="avatar sm">${esc(initial(name))}</span><span>${esc(name)}</span>${opts.me ? ` <span class="pill role-seller">${esc(t('You'))}</span>` : ''}${opts.tag || ''}`;
-  if (isAdmin() && sellerByName(name)) return `<a class="person" href="${hrefFor('seller', { name, tab: opts.tab })}">${inner}</a>`;
+  if (isManager() && canManage(name) && sellerByName(name)) return `<a class="person" href="${hrefFor('seller', { name, tab: opts.tab })}">${inner}</a>`;
   return `<span class="person">${inner}</span>`;
 }
 
@@ -1456,7 +1473,7 @@ function renderLatestSalesCard(monthList, m){
     </tr>`).join('') : `<tr class="empty-row"><td colspan="4">${esc(t('No sales logged in this month.'))}</td></tr>`;
   return `
     <section class="card" aria-label="${esc(t('Latest sales'))}">
-      ${cardHead('receipt', esc(t('Latest sales')), isAdmin() ? `<a href="${hrefFor('entries')}" class="view-all">${esc(t('Manage all'))} →</a>` : (isSeller() ? `<a href="${hrefFor('myentries')}" class="view-all">${esc(t('My entries'))} →</a>` : ''))}
+      ${cardHead('receipt', esc(t('Latest sales')), isManager() ? `<a href="${hrefFor('entries')}" class="view-all">${esc(t('Manage all'))} →</a>` : (isSeller() ? `<a href="${hrefFor('myentries')}" class="view-all">${esc(t('My entries'))} →</a>` : ''))}
       <div class="table-wrap free"><table>
         <thead><tr><th scope="col">${esc(t('Date'))}</th><th scope="col">${esc(t('Seller'))}</th><th scope="col">${esc(t('Class'))}</th><th scope="col">${esc(t("Amount (so'm)"))}</th></tr></thead>
         <tbody>${rows}</tbody>
@@ -1524,7 +1541,7 @@ function viewLogin(){
       <div class="demo-accounts">
         ${window.SalesPaceDemo.accounts.map(a => `
           <button type="button" class="demo-acc ${a.role === 'admin' ? 'admin' : ''}" onclick="demoLogin(${jsArg(a.username)})" ${authBusy ? 'disabled' : ''}>
-            <b>${a.role === 'admin' ? esc(t('Admin — team leader, full control')) : esc(a.name)}</b>
+            <b>${a.role === 'admin' ? esc(t('Admin — full control')) : esc(a.name) + (a.role === 'leader' ? ' · ' + esc(t('Team leader')) : '')}</b>
             <span>${esc(a.username)}${a.note ? ' · ' + esc(t(a.note)) : ''}</span>
           </button>`).join('')}
       </div>
@@ -1544,7 +1561,7 @@ function viewLogin(){
     </div>`;
 }
 function startSession(res){
-  session = { token: res.token, role: res.role, name: res.name, exp: res.exp };
+  session = { token: res.token, role: res.role, name: res.name, exp: res.exp, leader: res.leader || '' };
   saveSession(session);
   authBanner = null;
 }
@@ -1615,7 +1632,7 @@ function logOut(){
 /* ---------- seller views (shared by the seller and the admin workspace) ---------- */
 
 function notFoundCard(name){
-  return `<section class="card"><p>${name ? esc(t('No seller named {name} was found.', { name })) : esc(t('Seller profile not found.'))} ${isAdmin() ? `<a href="${hrefFor('team')}">${esc(t('Open Team'))}</a>` : esc(t('Ask your admin to check the Team page.'))}</p></section>`;
+  return `<section class="card"><p>${name ? esc(t('No seller named {name} was found.', { name })) : esc(t('Seller profile not found.'))} ${isManager() ? `<a href="${hrefFor('team')}">${esc(t('Open Team'))}</a>` : esc(t('Ask your admin to check the Team page.'))}</p></section>`;
 }
 
 function renderRankCard(name, m){
@@ -1730,7 +1747,7 @@ function renderSellerSales(name, asAdmin){
       <button type="button" class="btn" onclick="openSaleModal(${jsArg(name)})">${icon('plus')}<span>${esc(asAdmin ? t('Add sale for {name}', { name }) : t('Add sale'))}</span></button>
       <a class="btn btn-ghost" href="${asAdmin ? hrefFor('seller', { name, tab: 'standards' }) : hrefFor('standards')}">${icon('check')}<span>${esc(asAdmin ? t('Standards & calls') : t('Today’s standards & calls'))}</span></a>
       <a class="btn btn-ghost" href="${asAdmin ? hrefFor('seller', { name, tab: 'entries' }) : hrefFor('myentries')}">${icon('receipt')}<span>${esc(asAdmin ? t('Edit entries') : t('My entries'))}</span></a>
-      ${asAdmin ? `<a class="btn btn-ghost" href="${hrefFor('seller', { name, tab: 'account' })}">${icon('target')}<span>${esc(t('Category, plan & login'))}</span></a>` : ''}
+      ${asAdmin && isAdmin() ? `<a class="btn btn-ghost" href="${hrefFor('seller', { name, tab: 'account' })}">${icon('target')}<span>${esc(t('Category, plan & login'))}</span></a>` : ''}
     </div>`;
   const marks = info.tiers ? info.tiers.map(x => x.from) : [];
   const mix = renderClassMix(stats.entries, t('Sales by client class'));
@@ -1892,7 +1909,7 @@ function renderSellerEntries(name, asAdmin){
         ${cardHead('receipt', esc(asAdmin ? t('{name}’s sales', { name }) : t('Your sales')), `<span class="kicker">${esc(cnt(mine.length, '{n} entry', '{n} entries'))}</span>`)}
         ${errorHtml('entries')}
         ${entriesTable(mine, { showSeller: false, allowMove: asAdmin, scrollKey: 'seller-entries', emptyText: t('No sales logged yet. Use the form to add the first one.') })}
-        ${asAdmin ? `<p class="hint">${esc(t('As admin you can also move a sale to another seller: press Edit and pick the seller.'))}</p>` : ''}
+        ${asAdmin ? `<p class="hint">${esc(isAdmin() ? t('As admin you can also move a sale to another seller: press Edit and pick the seller.') : t('You can also move a sale to another seller in your team: press Edit and pick the seller.'))}</p>` : ''}
       </section>
     </div>`;
 }
@@ -1954,7 +1971,7 @@ function renderSellerStandards(name, asAdmin){
       ${total ? `<td><span class="pill ${metOn(d) === total ? 'ok' : (loggedOn(d) ? 'short' : '')}">${metOn(d)}/${total}</span></td>` : ''}
     </tr>`;
   }).join('');
-  const noStd = total ? '' : `<p class="hint">${asAdmin
+  const noStd = total ? '' : `<p class="hint">${asAdmin && isAdmin()
     ? `${esc(t('No daily standards defined yet. Add some in'))} <a href="${hrefFor('settings')}" onclick="ui.settingsTab='standards'">${esc(t('Settings → Standards'))}</a>.`
     : esc(t('Your admin hasn’t defined any daily standards yet.'))}</p>`;
   return `
@@ -2013,7 +2030,7 @@ function viewMyStandards(){
 
 function viewWorkspace(){
   const name = route.params.name || '';
-  const s = sellerByName(name);
+  const s = canManage(name) ? sellerByName(name) : null; // leaders: their own team only
   if (!s){
     return pageHead(esc(t('Admin')), esc(t('Seller workspaces')), esc(t('Open any seller to see and edit their sales and pay — no seller password needed.'))) + `
       ${name ? notFoundCard(name) : ''}
@@ -2022,18 +2039,19 @@ function viewWorkspace(){
           <div class="top"><span class="avatar">${esc(initial(x.name))}</span><div class="who"><div class="name">${esc(x.name)}</div><div class="meta">${esc(catLabel(sellerInfo(x.name, currentMonthKey()).cat))}</div></div></div>
         </a>`).join('') || `<p class="empty">${esc(t('No sellers yet.'))}</p>`}</div>`;
   }
-  const tab = WS_TABS.some(x => x[0] === route.params.tab) ? route.params.tab : 'sales';
+  const wsTabs = wsTabsFor();
+  const tab = wsTabs.some(x => x[0] === route.params.tab) ? route.params.tab : 'sales';
   const snap = teamRisks()[name];
   const info = sellerInfo(name, currentMonthKey());
-  const tabs = `<nav class="tab-row" aria-label="${esc(t('Workspace sections'))}">${WS_TABS.map(([id, label]) =>
+  const tabs = `<nav class="tab-row" aria-label="${esc(t('Workspace sections'))}">${wsTabs.map(([id, label]) =>
     `<a class="tab-btn ${tab === id ? 'active' : ''}" href="${hrefFor('seller', { name, tab: id })}" ${tab === id ? 'aria-current="page"' : ''}>${esc(t(label))}</a>`).join('')}</nav>`;
   let body;
   if (tab === 'entries') body = renderSellerEntries(name, true);
   else if (tab === 'standards') body = renderSellerStandards(name, true);
-  else if (tab === 'account') body = renderSellerAccount(name);
+  else if (tab === 'account' && isAdmin()) body = renderSellerAccount(name);
   else body = (tab === 'sales' ? `<div class="toolbar">${monthSwitch()}</div>` + pastBanner(viewMonth()) : '') + renderSellerSales(name, true);
   return `
-    <div class="banner banner-admin" role="note"><span><strong>${esc(t('Admin view'))}</strong>${esc(t('You’re working inside {name}’s workspace. Everything you change is saved as “admin” in the audit log.', { name }))}</span></div>
+    <div class="banner banner-admin" role="note"><span><strong>${esc(isAdmin() ? t('Admin view') : t('Team leader view'))}</strong>${esc(isAdmin() ? t('You’re working inside {name}’s workspace. Everything you change is saved as “admin” in the audit log.', { name }) : t('You’re working inside {name}’s workspace. Everything you change is saved under your name in the audit log.', { name }))}</span></div>
     <section class="card slash ws-card" aria-label="${esc(t('Seller'))}">
       <div class="ws-head">
         <span class="avatar lg">${esc(initial(name))}</span>
@@ -2046,7 +2064,8 @@ function viewWorkspace(){
             <span class="pill plain num">${info.plan ? esc(t('Plan {n}', { n: money(info.plan) })) : esc(t('No plan'))}</span>
             ${startNote(info, currentMonthKey()) ? `<span class="pill plain">${esc(startNote(info, currentMonthKey()))}</span>` : ''}
             ${s.restDay != null ? `<span class="pill plain rest-pill">${esc(t('Rests: {d}', { d: weekdayName(s.restDay) }))}</span>` : ''}
-            <span class="pill plain">${s.hasLogin ? esc(t('Login: {u}', { u: s.username || '✓' })) : esc(t('No login'))}</span>
+            ${s.leader ? `<span class="pill role-leader">${esc(t('Team leader'))}</span>` : ''}
+            ${isAdmin() ? `<span class="pill plain">${s.hasLogin ? esc(t('Login: {u}', { u: s.username || '✓' })) : esc(t('No login'))}</span>` : ''}
           </div>
         </div>
         <div class="ws-switch">
@@ -2055,13 +2074,15 @@ function viewWorkspace(){
         </div>
       </div>
     </section>
-    ${isDeactivated(s) ? `<div class="banner banner-off" role="note"><span>${esc(t('{name} is deactivated: hidden from the team, login blocked. Sales and pay up to the last working day stay on record.', { name }))}</span><button type="button" class="btn btn-sm" onclick="reactivateSeller(${jsArg(name)})" ${busy ? 'disabled' : ''}>${esc(t('Reactivate'))}</button></div>` : ''}
+    ${isDeactivated(s) ? `<div class="banner banner-off" role="note"><span>${esc(t('{name} is deactivated: hidden from the team, login blocked. Sales and pay up to the last working day stay on record.', { name }))}</span>${isAdmin() ? `<button type="button" class="btn btn-sm" onclick="reactivateSeller(${jsArg(name)})" ${busy ? 'disabled' : ''}>${esc(t('Reactivate'))}</button>` : ''}</div>` : ''}
     ${tabs}
     ${body}`;
 }
+/* Leaders don't get the Account tab (plans, logins, team moves are admin-only). */
+function wsTabsFor(){ return isAdmin() ? WS_TABS : WS_TABS.filter(x => x[0] !== 'account'); }
 function switchWorkspace(name){
   if (!name) return;
-  const tab = WS_TABS.some(x => x[0] === route.params.tab) ? route.params.tab : undefined;
+  const tab = wsTabsFor().some(x => x[0] === route.params.tab) ? route.params.tab : undefined;
   navigate('seller', { name, tab });
 }
 
@@ -2094,6 +2115,12 @@ function renderSellerAccount(name){
         <p class="hint" style="margin-top:-6px !important;margin-bottom:12px !important">${esc(t('Daily targets count only working days. No standards are expected on the rest day, and it never counts as a day without sales. A sale on a rest day still counts.'))}</p>
         <button type="button" class="btn" onclick="saveSellerPlan(${jsArg(name)})" ${busy ? 'disabled' : ''}>${esc(pendingKey === 'plan' ? t('Saving…') : t('Save'))}</button>
         <p class="hint">${esc(t('Applies from {month} on. Earlier months keep their own category and plan.', { month: monthLabel(month) }))}</p>
+      </section>
+      <section class="card" aria-label="${esc(t('Role'))}">
+        ${cardHead('users', esc(t('Role')))}
+        ${errorHtml('acct-role')}
+        <label class="check"><input type="checkbox" id="acct-leader" ${s.leader ? 'checked' : ''} onchange="saveSellerRole(${jsArg(name)}, this.checked)" ${busy ? 'disabled' : ''}> ${esc(t('Team leader of {team}', { team: teamName(sellerTeam(s)) }))}</label>
+        <p class="hint">${esc(t('A team leader keeps their own sales and pay, and also sees their team’s dashboard, RNP, compliance and salaries, and can add, fix or remove their team’s sales, leads and call time. Plans, pay rules, sellers and logins stay admin-only. They need a login (below).'))}</p>
       </section>
       <section class="card" aria-label="${esc(t('Name'))}">
         ${cardHead('user', esc(t('Name')))}
@@ -2303,7 +2330,7 @@ function viewTeam(){
       <article class="seller-card">
         <div class="top">
           <span class="avatar">${esc(initial(s.name))}</span>
-          <div class="who"><a class="name person" href="${ws}">${esc(s.name)}</a><div class="meta">${esc(catLabel(x.info.cat))}${startNote(x.info, month) ? ' · ' + esc(startNote(x.info, month)) : ''}${s.restDay != null ? ' · ' + esc(t('rests {d}', { d: weekdayName(s.restDay) })) : ''}</div></div>
+          <div class="who"><a class="name person" href="${ws}">${esc(s.name)}</a>${s.leader ? ` <span class="pill role-leader">${esc(t('Leader'))}</span>` : ''}<div class="meta">${esc(catLabel(x.info.cat))}${startNote(x.info, month) ? ' · ' + esc(startNote(x.info, month)) : ''}${s.restDay != null ? ' · ' + esc(t('rests {d}', { d: weekdayName(s.restDay) })) : ''}</div></div>
           ${isDeactivated(s) ? `<span class="pill off-pill">${esc(t('Deactivated'))}</span>` : riskPill(x.risk)}
         </div>
         ${isDeactivated(s) ? `<div class="kicker">${esc(t('Last working day: {d}', { d: s.endDate ? shortDay(s.endDate) : '—' }))}</div>` : ''}
@@ -2313,13 +2340,13 @@ function viewTeam(){
         <div class="card-actions">
           <a class="btn btn-sm" href="${ws}">${esc(t('Open workspace'))}</a>
           ${isDeactivated(s)
-            ? `<button type="button" class="btn btn-sm btn-ghost" onclick="reactivateSeller(${jsArg(s.name)})" ${busy ? 'disabled' : ''}>${icon('refresh')}<span>${esc(t('Reactivate'))}</span></button>`
+            ? (isAdmin() ? `<button type="button" class="btn btn-sm btn-ghost" onclick="reactivateSeller(${jsArg(s.name)})" ${busy ? 'disabled' : ''}>${icon('refresh')}<span>${esc(t('Reactivate'))}</span></button>` : '')
             : `<button type="button" class="btn btn-sm btn-ghost" onclick="openSaleModal(${jsArg(s.name)})">${icon('plus')}<span>${esc(t('Sale'))}</span></button>`}
         </div>
       </article>`;
   }).join('');
-  return pageHead(esc(multiTeam() ? teamName(curTeam()) : t('Team')), esc(t('Sellers')), esc(t('Open a seller’s workspace to see and edit everything as admin.')),
-      `<button type="button" class="btn" onclick="openAddSeller()">${icon('plus')}<span>${esc(t('Add seller'))}</span></button>`) + teamTabs() + `
+  return pageHead(esc(multiTeam() ? teamName(curTeam()) : t('Team')), esc(t('Sellers')), esc(isAdmin() ? t('Open a seller’s workspace to see and edit everything as admin.') : t('Your team. Open a seller’s workspace to see their pace, sales and standards.')),
+      isAdmin() ? `<button type="button" class="btn" onclick="openAddSeller()">${icon('plus')}<span>${esc(t('Add seller'))}</span></button>` : '') + teamTabs() + `
     <section class="card">
       <div class="filter-row" style="margin-bottom:0">
         <div class="field" style="flex:1 1 240px"><label for="team-q">${esc(t('Search'))}</label><input type="search" id="team-q" value="${esc(ui.teamQuery)}" placeholder="${esc(t('Name or username…'))}" autocomplete="off" oninput="setTeamQuery(this.value)"></div>
@@ -2380,7 +2407,7 @@ function viewSalaries(){
       <div class="stat-tile"><div class="stat-label">${esc(t('Total payroll'))}</div><div class="stat-value num">${fmt(totAll + lpTotal)}</div><div class="stat-sub">${esc(totSold ? t('{p}% of team sales', { p: ((totAll + lpTotal) / totSold * 100).toFixed(1) }) : '—')}</div></div>
     </section>
     <section class="card slash" aria-label="${esc(t('Sellers’ pay'))}">
-      ${cardHead('wallet', esc(t('Sellers’ pay')), `<a class="view-all" href="${hrefFor('settings')}" onclick="ui.settingsTab='pay'">${esc(t('Edit pay rules'))} →</a>`)}
+      ${cardHead('wallet', esc(t('Sellers’ pay')), isAdmin() ? `<a class="view-all" href="${hrefFor('settings')}" onclick="ui.settingsTab='pay'">${esc(t('Edit pay rules'))} →</a>` : '')}
       <div class="table-wrap free"><table>
         <thead><tr><th scope="col">${esc(t('Seller'))}</th><th scope="col">${esc(t('Sold'))}</th><th scope="col">${esc(t('Of plan'))}</th><th scope="col">${esc(t('Tier'))}</th><th scope="col" class="hide-sm">${esc(t('Fixed'))}</th><th scope="col" class="hide-sm">${esc(t('From sales'))}</th><th scope="col">${esc(t('Total'))}</th>${past ? '' : `<th scope="col" class="hide-sm">${esc(t('At this pace'))}</th>`}</tr></thead>
         <tbody>${rows || `<tr class="empty-row"><td colspan="8">${esc(t('No sellers yet.'))}</td></tr>`}</tbody>
@@ -2428,7 +2455,7 @@ function setRnpSeller(name){ ui.rnpSeller = ui.rnpSeller === name ? '' : name; r
 function setRnpWeekly(v){ ui.rnpWeekly = !!v; render({ fresh: true }); }
 
 function rnpBoard(m, team){
-  const roster = rosterFor(m, 'all');
+  const roster = rosterFor(m, isLeader() ? session.leader : 'all'); // leaders: their own team only
   const groups = {};
   roster.forEach(s => { const c = rnpClassOf(s.name, m); (groups[c] = groups[c] || []).push(s); });
   const rows = RNP_CLASS_ORDER.filter(c => groups[c]).map(c => {
@@ -2506,7 +2533,7 @@ function rnpColumns(m, weekly){
 function viewRnp(){
   const m = viewMonth();
   const team = curTeam();
-  if (ui.rnpSeller && !sellerByName(ui.rnpSeller)) ui.rnpSeller = '';
+  if (ui.rnpSeller && (!sellerByName(ui.rnpSeller) || !canManage(ui.rnpSeller))) ui.rnpSeller = '';
   const seller = ui.rnpSeller || '';
   const names = seller ? [seller] : teamMembers(team).map(s => s.name);
   const nameSet = new Set(names);
@@ -3034,7 +3061,7 @@ function accountCard(){
   return `
     <section class="card form-narrow" aria-label="${esc(t('Account'))}">
       ${cardHead('user', esc(t('Account')))}
-      <p>${esc(t('Logged in as {name} ({role}). You stay logged in on this device for 7 days unless you log out.', { name: session.name, role: isAdmin() ? t('admin') : t('seller') }))}</p>
+      <p>${esc(t('Logged in as {name} ({role}). You stay logged in on this device for 7 days unless you log out.', { name: session.name, role: isAdmin() ? t('admin') : isLeader() ? t('team leader') : t('seller') }))}</p>
       ${errorHtml('pw')}
       <div class="field"><label for="pw-current">${esc(t('Current password'))}</label><input type="password" id="pw-current" autocomplete="current-password"></div>
       <div class="field"><label for="pw-new">${esc(t('New password'))}</label><input type="password" id="pw-new" autocomplete="new-password"></div>
@@ -3082,8 +3109,9 @@ function openSaleModal(seller, date){
   if (!session) return;
   if (!data.sellers.length && isAdmin()){ showToast(t('Add a seller first.'), 'error'); return; }
   let pre = typeof seller === 'string' ? seller : '';
-  if (!pre && isAdmin() && route.name === 'seller' && sellerByName(route.params.name)) pre = route.params.name;
-  const who = isAdmin() ? pre : session.name;
+  if (!pre && isManager() && route.name === 'seller' && sellerByName(route.params.name) && canManage(route.params.name)) pre = route.params.name;
+  if (pre && !canManage(pre)) pre = '';
+  const who = isAdmin() ? pre : isLeader() ? (pre || session.name) : session.name;
   modal = { type: 'sale', seller: who, cls: who ? defaultClass(who) : 'O', date: isDateStr(date || '') && date <= todayStr() ? date : '' };
   delete errors.modal;
   sidebarOpen = false;
@@ -3099,7 +3127,7 @@ function modalSellerChange(v){
   render();
 }
 function saleModalHtml(){
-  const admin = isAdmin();
+  const admin = isManager();
   const today = todayStr();
   const seller = modal.seller;
   const month = currentMonthKey();
@@ -3157,7 +3185,7 @@ function calLogDay(){
   const name = modal.seller, d = modal.day;
   modal = null;
   ui.activityDate[name] = d;
-  if (isAdmin()) navigate('seller', { name, tab: 'standards' });
+  if (isManager() && canManage(name) && (isAdmin() || name !== session.name)) navigate('seller', { name, tab: 'standards' });
   else navigate('standards');
 }
 function calendarHtml(){
@@ -3204,7 +3232,7 @@ function calendarHtml(){
   const d = modal.day;
   const list = (byDay[d] || []).slice();
   const c = callMinutes(d, name);
-  const canEdit = d <= today && (isAdmin() || (isSeller() && session.name === name));
+  const canEdit = d <= today && canManage(name);
   const salesRows = list.length ? list.map(e => `<div class="cal-sale">${classPill(e.cls)}<span class="num">${esc(money(e.amount))}</span></div>`).join('') : `<p class="muted">${esc(t('No sales this day.'))}</p>`;
   const stdRows = data.standards.map(std => {
     const r = findActivity(d, name, std.name);
@@ -3310,13 +3338,13 @@ function whoText(seller){ return seller === session.name ? t('you') : seller; }
 
 async function submitSaleModal(){
   if (busy || !modal || modal.type !== 'sale') return;
-  const seller = isAdmin() ? val('m-seller') : session.name;
+  const seller = isManager() ? val('m-seller') : session.name;
   const date = val('m-date');
   const amount = parseFormattedNumber(val('m-amount'));
   const cls = val('m-class');
   const product = val('m-product'), payment = val('m-payment');
   if (!checkSale('modal', seller, date, amount, cls)) return;
-  const keep = isAdmin() && isChecked('m-keep');
+  const keep = isManager() && isChecked('m-keep');
   await runAction({ action: 'addEntry', seller, date, amount, cls, product, payment },
     t('Sale saved: {amount} ({cls}) for {who} on {date}.', { amount: money(amount), cls, who: whoText(seller), date: shortDay(date) }), {
       requestId: requestIdFor('sale-modal', [seller, date, amount, cls, product, payment].join('|')),
@@ -3329,7 +3357,7 @@ async function submitSaleModal(){
 }
 async function submitSale(name){
   if (busy) return;
-  const seller = isAdmin() ? name : session.name;
+  const seller = canManage(name) ? name : session.name;
   const date = val('sale-date');
   const amount = parseFormattedNumber(val('sale-amount'));
   const cls = val('sale-class');
@@ -3414,7 +3442,7 @@ function deleteEntry(id){
   if (!e) return;
   openConfirm({
     title: t('Delete this sale?'),
-    html: `<strong class="num">${esc(money(e.amount))}</strong> · ${esc(dayLabel(e.date))}${isAdmin() ? ` · <strong>${esc(e.seller)}</strong>` : ''}. ${esc(t('This can’t be undone, but it stays in the audit log.'))}`,
+    html: `<strong class="num">${esc(money(e.amount))}</strong> · ${esc(dayLabel(e.date))}${isManager() ? ` · <strong>${esc(e.seller)}</strong>` : ''}. ${esc(t('This can’t be undone, but it stays in the audit log.'))}`,
     confirmLabel: t('Delete sale'), danger: true,
     run: () => runAction({ action: 'deleteEntry', id }, t('Sale deleted.'), {
       formKey: 'modal', pendingKey: 'confirm', closeModal: true,
@@ -3491,6 +3519,10 @@ async function saveCategoryQuick(name){
   const cat = val('ws-cat-quick');
   if (!cat) return fail('ws-cat', t('Choose the seller’s category: C or Other.'));
   await runAction({ action: 'updateSeller', name, category: cat }, t('{name} is now in {cat}.', { name, cat: catLabel(cat) }), { formKey: 'ws-cat', pendingKey: 'cat' });
+}
+async function saveSellerRole(name, on){
+  if (busy) return;
+  await runAction({ action: 'setLeader', name, leader: !!on }, on ? t('{name} is now a team leader.', { name }) : t('{name} is a seller again.', { name }), { formKey: 'acct-role', pendingKey: 'role' });
 }
 async function renameSeller(name){
   if (busy) return;

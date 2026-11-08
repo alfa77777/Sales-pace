@@ -541,6 +541,7 @@ a.risk-row:hover{ background: var(--surface-2); }
 .pill.atrisk{ background: var(--risk-bg); color: var(--risk); }
 .pill.role-admin{ background: var(--bad-bg); color: var(--bad); }
 .pill.role-seller{ background: var(--accent-bg); color: var(--accent-text); }
+.pill.role-leader{ background: var(--good-bg); color: var(--good); }
 .pill.demo{ background: var(--warn-bg); color: var(--warn); }
 .pill.plain{ text-transform: none; letter-spacing: 0; font-size: var(--text-xs); }
 
