@@ -437,9 +437,18 @@ function sellerPlanIn_(cfg, name) {
 function teamPlanIn_(cfg, month, dates, teamId) {
   const slot = teamSlot_(cfg, teamId, false);
   if (!isSumMode_(slot)) return Number(slot && slot.teamPlan) || 0;
-  return (slot.teamSellers || []).reduce(function (sum, name) {
+  // Plan = ticked sellers who worked from the 1st of the month, without team
+  // leaders (a leader's sales count for the team, their own plan doesn't).
+  // Sellers who started later in the month are extra: no plan, sales shown apart.
+  return planSellers_(slot.teamSellers || [], month, dates).reduce(function (sum, name) {
+    if (dates.leader && dates.leader[name]) return sum;
     return sum + proratedPlan_(sellerPlanIn_(cfg, name), month, dates.start[name] || '', dates.end[name] || '');
   }, 0);
+}
+/* Ticked sellers who count for the team plan this month: started on or before the 1st. */
+function planSellers_(names, month, dates) {
+  const first = month + '-01';
+  return names.filter(function (n) { const st = dates.start[n] || ''; return !st || st <= first; });
 }
 /* { name: teamId } for every seller on the roster. */
 function readSellerTeams_(teams) {
@@ -453,13 +462,14 @@ function readSellerTeams_(teams) {
 }
 /* { start: {name: date}, end: {name: date} } for every seller on the roster. */
 function readSellerDates_() {
-  const out = { start: {}, end: {} };
+  const out = { start: {}, end: {}, leader: {} };
   const sheet = ensureSellersSheet_();
   if (sheet.getLastRow() < 2) return out;
-  sheet.getRange(2, 1, sheet.getLastRow() - 1, 8).getValues().forEach(function (row) {
+  sheet.getRange(2, 1, sheet.getLastRow() - 1, 11).getValues().forEach(function (row) {
     if (row[0] === '') return;
     out.start[String(row[0])] = cellDate_(row[6]);
     out.end[String(row[0])] = cellDate_(row[7]);
+    if (isLeaderCell_(row[10])) out.leader[String(row[0])] = true;
   });
   return out;
 }
@@ -673,7 +683,7 @@ function doGet(e) {
   const planRows = readPlanRows_();
   const payBase = planRows.length ? null : legacyBase_();
   const current = effectiveFrom_(planRows, currentMonth_()) || payBase || payDefaults_();
-  const dates = { start: {}, end: {} };
+  const dates = { start: {}, end: {}, leader: {} };
   const teams = readTeams_();
 
   const sellers = [];
@@ -683,7 +693,7 @@ function doGet(e) {
       if (row[0] === '') return;
       const a = (current.sellers || {})[String(row[0])] || { cat: '', plan: 0 };
       const s = { name: String(row[0]), hasLogin: !!row[2], team: teamCell_(row[9], teams) };
-      if (isLeaderCell_(row[10])) s.leader = true;
+      if (isLeaderCell_(row[10])) { s.leader = true; dates.leader[s.name] = true; }
       dates.start[s.name] = cellDate_(row[6]);
       dates.end[s.name] = cellDate_(row[7]);
       // Deactivated sellers: everyone sees the month they left (to hide them

@@ -1064,3 +1064,11 @@ table.rnp-table tr.rnp-group-row th{
 ol.steps{ margin: var(--sp-3) 0 var(--sp-4); padding-left: 1.3em; display: grid; gap: var(--sp-2); }
 ol.steps .btn{ vertical-align: middle; cursor: grab; }
 .rnp-parts{ margin-top: 0; }
+
+/* ---------- weekly team race ---------- */
+.race-weeks{ margin: var(--sp-2) 0 var(--sp-3); overflow-x: auto; flex-wrap: nowrap; }
+.race-weeks .tab-btn{ white-space: nowrap; }
+.race-card tr.race-win td{ background: var(--good-bg); }
+.race-card .pill .icon, .race-history .icon{ width: 14px; height: 14px; vertical-align: -2px; }
+.race-history{ margin-top: var(--sp-3); }
+.race-history summary{ cursor: pointer; font-weight: 600; color: var(--ink-soft); }

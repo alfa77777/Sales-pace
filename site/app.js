@@ -312,21 +312,29 @@ function teamPlanFor(month, team){
   const c = cfgFor(month);
   const sl = teamSlot(c, team);
   if (!isSumPlan(sl)) return Number(sl.teamPlan) || 0;
-  if (session) return teamPlanSum(Object.assign({}, c, { teamSellers: sl.teamSellers || [] }), month, sellerStartDate, sellerEndDate);
+  // Plan sellers minus leaders: a leader's sales count for the team, their plan doesn't.
+  const planNames = fullMonthSellers(sl.teamSellers || [], month).filter(n => !(sellerByName(n) || {}).leader);
+  if (session) return teamPlanSum(Object.assign({}, c, { teamSellers: planNames }), month, sellerStartDate, sellerEndDate);
   return Number(((data.teamPlans || {})[team] || {})[month]) || 0;
 }
 /* Sellers whose plans make up the plan, or null when it is a typed number.
    "All teams": everyone in a typed-plan team plus the ticked sellers of sum-mode teams
    (null when no team uses the sum). */
+/* Ticked sellers who worked from the 1st of the month. Anyone who started later
+   in the month is an extra seller: no plan, their sales show as extra. */
+function fullMonthSellers(names, month){
+  const first = month + '-01';
+  return names.filter(n => { const st = sellerStartDate(n) || ''; return !st || st <= first; });
+}
 function teamSellersFor(month, team){
   team = team || curTeam();
   const c = cfgFor(month);
-  if (team !== 'all'){ const sl = teamSlot(c, team); return isSumPlan(sl) ? (sl.teamSellers || []) : null; }
+  if (team !== 'all'){ const sl = teamSlot(c, team); return isSumPlan(sl) ? fullMonthSellers(sl.teamSellers || [], month) : null; }
   if (!teamsList().some(x => isSumPlan(teamSlot(c, x.id)))) return null;
   const out = [];
   teamsList().forEach(x => {
     const sl = teamSlot(c, x.id);
-    if (isSumPlan(sl)) out.push(...(sl.teamSellers || []));
+    if (isSumPlan(sl)) out.push(...fullMonthSellers(sl.teamSellers || [], month));
     else out.push(...teamMembers(x.id).map(s => s.name));
   });
   return out;
@@ -2530,6 +2538,71 @@ function rnpColumns(m, weekly){
   return cols.reverse();
 }
 
+/* ---------- weekly team race (admin) ----------
+   Every week (Monday–Sunday) the team that sold the most money wins the weekly
+   bonus. Counts every sale of the team's sellers that week, extras included. */
+function mondayOf(s){ const d = parseYmd(s); const dow = (d.getDay() + 6) % 7; d.setDate(d.getDate() - dow); return ymdOf(d); }
+function raceWeeks(m){
+  const out = [];
+  const first = m + '-01';
+  const last = m + '-' + pad(monthInfoFor(m).daysInMonth);
+  for (let mon = mondayOf(first); mon <= last; mon = addDaysStr(mon, 7)) out.push(mon);
+  return out;
+}
+function raceRows(mon){
+  const sun = addDaysStr(mon, 6);
+  const inWeek = (x) => x.date >= mon && x.date <= sun;
+  const rows = teamsList().map(tm => {
+    const ents = teamEntries(tm.id).filter(inWeek);
+    const members = new Set(teamMembers(tm.id).map(s => s.name));
+    return {
+      id: tm.id, name: tm.name,
+      sold: sumAmounts(ents), count: ents.length,
+      minutes: teamCalls(tm.id).filter(inWeek).reduce((a, c) => a + c.minutes, 0),
+      leads: data.leads.filter(l => members.has(l.seller) && inWeek(l)).reduce((a, l) => a + l.taken, 0)
+    };
+  });
+  rows.sort((a, b) => b.sold - a.sold || b.count - a.count);
+  return rows;
+}
+function setRaceWeek(mon){ ui.raceWeek = mon; render({ fresh: true }); }
+function renderWeeklyRace(m){
+  if (!isAdmin() || teamsList().length < 2) return '';
+  const weeks = raceWeeks(m);
+  const today = todayStr();
+  const thisMon = mondayOf(today);
+  let mon = weeks.indexOf(ui.raceWeek) !== -1 ? ui.raceWeek : (weeks.indexOf(thisMon) !== -1 ? thisMon : weeks[weeks.length - 1]);
+  const sun = addDaysStr(mon, 6);
+  const rows = raceRows(mon);
+  const top = rows[0] && rows[0].sold > 0 ? rows[0] : null;
+  const running = today >= mon && today <= sun;
+  const label = (w) => `${shortDay(w)} – ${shortDay(addDaysStr(w, 6))}`;
+  const tabs = `<div class="tab-row race-weeks" role="tablist">${weeks.map(w => `<button type="button" role="tab" class="tab-btn ${w === mon ? 'active' : ''}" aria-selected="${w === mon}" onclick="setRaceWeek('${w}')" ${w > today ? 'disabled' : ''}>${esc(label(w))}</button>`).join('')}</div>`;
+  const body = rows.map((r, i) => `
+    <tr class="${top && r.id === top.id ? 'race-win' : ''}">
+      <td class="num">${i + 1}</td>
+      <td><strong>${esc(r.name)}</strong>${top && r.id === top.id ? ` <span class="pill ok">${icon('crown')}${esc(running ? t('Leading') : t('Winner'))}</span>` : ''}</td>
+      <td class="num"><strong>${fmt(r.sold)}</strong>${top && r.id !== top.id && r.sold ? ` <span class="muted small">−${fmtShort(top.sold - r.sold)}</span>` : ''}</td>
+      <td class="num">${fmt(r.count)}</td>
+      <td class="num">${r.minutes ? fmtHM(r.minutes) : '<span class="muted">—</span>'}</td>
+      <td class="num">${r.leads ? fmt(r.leads) : '<span class="muted">—</span>'}</td>
+    </tr>`).join('');
+  const history = weeks.filter(w => w <= today).map(w => {
+    const rr = raceRows(w); const win = rr[0] && rr[0].sold > 0 ? rr[0] : null;
+    const live = today >= w && today <= addDaysStr(w, 6);
+    return `<tr><td>${esc(label(w))}${live ? ` <span class="muted small">· ${esc(t('in progress'))}</span>` : ''}</td><td>${win ? `${icon('crown')} <strong>${esc(win.name)}</strong>` : '<span class="muted">—</span>'}</td><td class="num">${win ? fmt(win.sold) : '—'}</td></tr>`;
+  }).join('');
+  return `
+    <section class="card race-card" aria-label="${esc(t('Weekly team race'))}">
+      ${cardHead('crown', esc(t('Weekly team race')), `<span class="kicker">${esc(t('Monday–Sunday · most money wins the weekly bonus'))}</span>`)}
+      ${tabs}
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th class="num">#</th><th>${esc(t('Team'))}</th><th class="num">${esc(t('Sales (so‘m)'))}</th><th class="num">${esc(t('Sales count'))}</th><th class="num">${esc(t('Call time'))}</th><th class="num">${esc(t('Leads taken'))}</th></tr></thead>
+        <tbody>${body}</tbody></table></div>
+      <p class="hint">${esc(running ? t('This week is still running: {d} is the last day.', { d: shortDay(sun) }) : t('Week {w} is finished.', { w: label(mon) }))} ${esc(t('All sales of the team’s sellers count, new and extra sellers included.'))}</p>
+      ${history ? `<details class="race-history"><summary>${esc(t('Winners this month'))}</summary><div class="table-wrap"><table class="table"><thead><tr><th>${esc(t('Week'))}</th><th>${esc(t('Winner'))}</th><th class="num">${esc(t('Sales (so‘m)'))}</th></tr></thead><tbody>${history}</tbody></table></div></details>` : ''}
+    </section>`;
+}
 function viewRnp(){
   const m = viewMonth();
   const team = curTeam();
@@ -2609,6 +2682,7 @@ function viewRnp(){
   const bars = (list, label) => list.length ? list.map(x => `<div class="mix-row"><span class="mix-name">${esc(label(x))}</span><span class="mini-track"><span style="width:${Math.max(2, x.v / Math.max(sold, 1) * 100).toFixed(1)}%"></span></span><span class="mix-amt num">${fmtShort(x.v)}${x.n != null ? ` <span class="muted">· ${x.n}</span>` : ''}</span></div>`).join('') : `<p class="empty">${esc(t('Nothing yet this month.'))}</p>`;
   return pageHead(esc(t('RNP')), esc(t('Sales report')), esc(t('Daily sales by product and payment method, leads and calls — like the ERP RNP page.')), monthSwitch())
     + teamTabs() + pastBanner(m)
+    + renderWeeklyRace(m)
     + rnpBoard(m, team)
     + (seller ? rnpSellerCard(seller, m) : '')
     + `<section class="stat-grid" aria-label="${esc(t('Totals'))}">
@@ -2771,7 +2845,9 @@ function draftSellerPlan(d, name){
   const base = sellerPayInfo({ sellers: d.sellersCfg, categories: d.categories }, name);
   return planForMonth(base.plan, d.month, sellerStartDate(name), sellerEndDate(name));
 }
-function draftTeamSum(d){ return d.teamSellers.reduce((s, n) => s + draftSellerPlan(d, n).plan, 0); }
+/* Counted in the team plan: ticked, worked from the 1st, and not a leader. */
+function draftCountsInPlan(d, n){ return d.teamSellers.indexOf(n) !== -1 && fullMonthSellers([n], d.month).length > 0 && !(sellerByName(n) || {}).leader; }
+function draftTeamSum(d){ return d.teamSellers.reduce((s, n) => s + (draftCountsInPlan(d, n) ? draftSellerPlan(d, n).plan : 0), 0); }
 function payTeamChanged(){ syncPayDraft(); delete errors.pay; render({ fresh: true }); }
 function teamPlanFields(d){
   const radio = (v, label) => `<label class="check mode-opt"><input type="radio" name="pc-mode" value="${v}" ${d.teamMode === v ? 'checked' : ''} onchange="payTeamChanged()"><span>${esc(label)}</span></label>`;
@@ -2789,15 +2865,18 @@ function teamPlanFields(d){
       <input type="checkbox" value="${esc(n)}" ${on ? 'checked' : ''} onchange="payTeamChanged()">
       <span class="tp-name">${esc(n)}${gone}</span>
       <span class="tp-plan num">${pf.plan > 0 ? fmt(pf.plan) : `<span class="muted">${esc(t('No plan'))}</span>`}${note ? ` <span class="muted small">· ${esc(note)}</span>` : ''}</span>
-      <span class="pill ${on ? 'ok' : 'extra-pill'}">${esc(on ? t('In plan') : t('Extra'))}</span>
+      ${!on ? `<span class="pill extra-pill">${esc(t('Extra'))}</span>`
+        : !fullMonthSellers([n], d.month).length ? `<span class="pill extra-pill" title="${esc(t('Started after the 1st: no plan this month, sales count as extra'))}">${esc(t('New · extra'))}</span>`
+        : (sellerByName(n) || {}).leader ? `<span class="pill role-leader" title="${esc(t('A leader’s sales count for the team; their own plan is not added'))}">${esc(t('Leader · sales only'))}</span>`
+        : `<span class="pill ok">${esc(t('In plan'))}</span>`}
     </label>`;
   }).join('') : `<p class="empty">${esc(t('No sellers yet.'))}</p>`;
   return modeRow + `
     <div class="field team-sum-field">
       <span class="field-label">${esc(t('Sellers in the team plan'))}</span>
       <div id="pc-sellers" class="team-picks">${rows}</div>
-      <div class="team-sum"><span>${esc(t('Team plan = sum of {n} sellers', { n: d.teamSellers.length }))}</span><strong class="num">${money(draftTeamSum(d))}</strong></div>
-      <p class="hint">${esc(t('Only ticked sellers’ sales count toward the team plan and its 10-day reward milestones. Unticked sellers are extra: their sales show separately as “+ extra”. Plans follow each seller’s category, own plan and start date.'))}</p>
+      <div class="team-sum"><span>${esc(t('Team plan = sum of {n} sellers', { n: d.teamSellers.filter(n => draftCountsInPlan(d, n)).length }))}</span><strong class="num">${money(draftTeamSum(d))}</strong></div>
+      <p class="hint">${esc(t('Only ticked sellers’ sales count toward the team plan and its 10-day reward milestones. Unticked sellers are extra: their sales show separately as “+ extra”. Plans follow each seller’s category, own plan and start date.'))} ${esc(t('Sellers who started after the 1st are extra this month. Team leaders’ sales count for the team, but their own plan is not added.'))}</p>
     </div>`;
 }
 function addTier(kind){
