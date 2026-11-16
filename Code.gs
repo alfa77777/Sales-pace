@@ -10,11 +10,12 @@
  *
  * TABS (created automatically when missing)
  *   Config    A1 "Monthly Plan", B1 = all teams' plan this month (kept in sync; PlanConfig is the source)
- *   Sellers   Name | Target | Username | PasswordHash | Salt | Category | StartDate | EndDate | RestDay | Team | Role
+ *   Sellers   Name | Target | Username | PasswordHash | Salt | Category | StartDate | EndDate | RestDay | Team | Role | ErpName
  *             (Target = this seller's own plan, 0 = the category's default;
  *              Category = C or OTHER. Shown for reading — PlanConfig is the source;
  *              Role = "leader" for a team leader: sells, and manages their team's
- *              sales, leads and call time. Empty = seller)
+ *              sales, leads and call time. Empty = seller;
+ *              ErpName = the seller's full name in the ERP if it differs, for "Sync from RNP")
  *   Entries   Date | Seller | Amount | ID | Class | Product | Payment
  *             (Class: C, G, O, A or B; Product and Payment from the RNP lists)
  *   PlanConfig Month | Config   one JSON row per month that has its own pay rules:
@@ -64,7 +65,7 @@ const BAD_LOGIN = 'Incorrect username or password.';
 const PUBLIC_ACTIONS = { login: true, setupAdmin: true };
 const MAX_BULK_ROWS = 200;
 const ADMIN_ACTIONS = {
-  setPlan: true, savePayConfig: true, setLeader: true,
+  setPlan: true, savePayConfig: true, setLeader: true, syncRnp: true,
   addSeller: true, updateSeller: true, deactivateSeller: true, reactivateSeller: true, renameSeller: true, deleteSeller: true, setSellerCredentials: true,
   addStandard: true, updateStandard: true, deleteStandard: true,
   addTeam: true, renameTeam: true, deleteTeam: true,
@@ -137,7 +138,9 @@ function ensureSellersSheet_()   {
   // Team: the team's Id from the Teams tab (empty = the first team, "1").
   ensureHeader_(sh, 10, 'Team');
   // Role: "leader" = team leader (sells, plus manages their own team). Empty = seller.
-  return ensureHeader_(sh, 11, 'Role');
+  ensureHeader_(sh, 11, 'Role');
+  // ErpName: this seller's full name in the ERP when it differs from Name (for "Sync from RNP").
+  return ensureHeader_(sh, 12, 'ErpName');
 }
 /* Teams tab: Id, Name. The first team (Id 1) always exists; it holds everyone
    who was on the team before teams were added. */
@@ -838,6 +841,138 @@ function doPost(e) {
   }
 }
 
+
+/* ---------- Sync from RNP (admin) ----------
+   The ERP RNP page is the source of truth for the sellers it lists. The admin
+   copies one month of it with the "Copy RNP data" bookmark and pastes it into
+   Settings → Sync from RNP. One request compares it with the sheet (dryRun) or
+   applies it. The ERP only gives totals per seller, day and product, so each
+   product-day is one sale row. Sellers the ERP doesn't list are never touched. */
+const MAX_SYNC_SELLERS = 120;
+function rnpNum_(v) { const n = Math.round(Number(v)); return isFinite(n) && n > 0 ? n : 0; }
+function rnpPlan_(body) {
+  const month = String(body.month || '');
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) return { error: 'Choose a month (YYYY-MM).' };
+  const list = body.data && Array.isArray(body.data.sellers) ? body.data.sellers : null;
+  if (!list || !list.length) return { error: 'Paste the data copied from the ERP first.' };
+  if (list.length > MAX_SYNC_SELLERS) return { error: 'Too many sellers in the pasted data.' };
+  const parts = body.parts || {};
+  const doSales = parts.sales !== false, doLeads = parts.leads !== false, doCalls = parts.calls !== false;
+  const today = formatDate_(new Date());
+
+  // ERP name → Sales Pace seller (by Name, or by the ErpName column).
+  const ssh = ensureSellersSheet_();
+  const byKey = {};
+  if (ssh.getLastRow() > 1) {
+    ssh.getRange(2, 1, ssh.getLastRow() - 1, 12).getValues().forEach(function (r) {
+      if (r[0] === '') return;
+      const n = String(r[0]);
+      byKey[n.trim().toLowerCase()] = n;
+      if (String(r[11] || '').trim()) byKey[String(r[11]).trim().toLowerCase()] = n;
+    });
+  }
+  const matched = {}; const unmatched = [];
+  list.forEach(function (x) {
+    const erp = String(x && x.erp || '').trim();
+    if (!erp) return;
+    const name = byKey[erp.toLowerCase()];
+    if (!name) { unmatched.push(erp); return; }
+    matched[name] = { erp: erp, cls: SALE_CLASSES.indexOf(String(x.cls || '')) !== -1 ? String(x.cls) : '', days: x.days && typeof x.days === 'object' ? x.days : {} };
+  });
+  const inMonth = function (d) { return d.slice(0, 7) === month && d <= today; };
+
+  // ---- sales ----
+  const esh = ensureEntriesSheet_();
+  const eRows = esh.getLastRow() > 1 ? esh.getRange(2, 1, esh.getLastRow() - 1, 7).getValues() : [];
+  const sheetDays = {}; // seller|date -> [{i, amount}]
+  eRows.forEach(function (r, i) {
+    const name = String(r[1]); if (!matched[name]) return;
+    const d = cellDate_(r[0]); if (!d || !inMonth(d)) return;
+    (sheetDays[name + '|' + d] = sheetDays[name + '|' + d] || []).push({ i: i, amount: Number(r[2]) || 0, used: false });
+  });
+  const adds = [], dels = [], per = {};
+  const bump = function (name, k, v) {
+    const o = per[name] = per[name] || { name: name, erp: matched[name].erp, erpTotal: 0, sheetTotal: 0, add: 0, del: 0 };
+    o[k] += v;
+  };
+  if (doSales) Object.keys(matched).forEach(function (name) {
+    const m = matched[name];
+    const days = {};
+    Object.keys(m.days).forEach(function (d) { if (isValidDateStr_(d) && inMonth(d)) days[d] = 1; });
+    Object.keys(sheetDays).forEach(function (k) { if (k.indexOf(name + '|') === 0) days[k.slice(name.length + 1)] = 1; });
+    Object.keys(days).sort().forEach(function (d) {
+      const e = m.days[d] || {};
+      const prods = [];
+      Object.keys(e.p || {}).forEach(function (pk) { const sum = rnpNum_((e.p[pk] || [])[0]); if (sum) prods.push([pk, sum]); });
+      prods.sort(function (a, b) { return b[1] - a[1]; });
+      const pays = Object.keys(e.pay || {}).map(function (k) { return { k: k, a: rnpNum_(e.pay[k]) }; });
+      const rows = sheetDays[name + '|' + d] || [];
+      const erpT = prods.reduce(function (s2, p) { return s2 + p[1]; }, 0);
+      const shT = rows.reduce(function (s2, r) { return s2 + r.amount; }, 0);
+      bump(name, 'erpTotal', erpT); bump(name, 'sheetTotal', shT);
+      if (erpT === shT) return;
+      // Keep sheet rows that equal an ERP product-day; add the rest; remove what's left over.
+      prods.forEach(function (p) {
+        const hit = rows.find(function (r) { return !r.used && r.amount === p[1]; });
+        if (hit) { hit.used = true; const q0 = pays.find(function (x) { return x.a === p[1]; }); if (q0) q0.a = 0; return; }
+        const q = pays.find(function (x) { return x.a === p[1]; }) || pays.slice().sort(function (a, b) { return b.a - a.a; })[0];
+        const pay = q && validPayment_(q.k) ? q.k : '';
+        if (q) q.a -= Math.min(q.a, p[1]);
+        adds.push([d, name, p[1], Utilities.getUuid(), m.cls, validProduct_(p[0]) ? p[0] : '', pay]);
+        bump(name, 'add', p[1]);
+      });
+      rows.forEach(function (r) { if (!r.used) { dels.push(r.i); bump(name, 'del', r.amount); } });
+    });
+  });
+
+  // ---- leads / call time: one row per seller per day, set to the ERP value ----
+  const dayTable = function (sheet, valueOf, width) {
+    const rows = sheet.getLastRow() > 1 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, width).getValues() : [];
+    const at = {};
+    rows.forEach(function (r, i) { const d = cellDate_(r[0]); if (d) at[String(r[1]) + '|' + d] = i; });
+    const set = [], add = [];
+    Object.keys(matched).forEach(function (name) {
+      const keys = {};
+      Object.keys(matched[name].days).forEach(function (d) { if (isValidDateStr_(d) && inMonth(d)) keys[d] = 1; });
+      Object.keys(at).forEach(function (k) { if (k.indexOf(name + '|') === 0 && inMonth(k.slice(name.length + 1))) keys[k.slice(name.length + 1)] = 1; });
+      Object.keys(keys).forEach(function (d) {
+        const v = valueOf(matched[name].days[d] || {});
+        const i = at[name + '|' + d];
+        if (i === undefined) { if (v.some(function (x) { return x > 0; })) add.push([d, name].concat(v)); return; }
+        const old = rows[i].slice(2, 2 + v.length).map(function (x) { return Number(x) || 0; });
+        if (old.join() !== v.join()) set.push({ i: i, v: v });
+      });
+    });
+    return { sheet: sheet, set: set, add: add };
+  };
+  const leads = doLeads ? dayTable(ensureLeadsSheet_(), function (e) { return [rnpNum_(e.lt), rnpNum_(e.lc)]; }, 4) : null;
+  const calls = doCalls ? dayTable(ensureCallTimeSheet_(), function (e) { return [Math.min(rnpNum_(e.min), MAX_CALL_MINUTES)]; }, 3) : null;
+
+  return {
+    month: month, matched: matched, unmatched: unmatched, adds: adds, dels: dels, eRows: eRows, esh: esh, leads: leads, calls: calls,
+    per: Object.keys(per).map(function (k) { return per[k]; }).filter(function (o) { return o.add || o.del; })
+  };
+}
+function rnpSummary_(p) {
+  return {
+    month: p.month, sellers: Object.keys(p.matched).length, unmatched: p.unmatched,
+    add: p.adds.length, addSum: p.adds.reduce(function (s, r) { return s + r[2]; }, 0),
+    del: p.dels.length, delSum: p.dels.reduce(function (s, i) { return s + (Number(p.eRows[i][2]) || 0); }, 0),
+    leads: p.leads ? p.leads.set.length + p.leads.add.length : 0,
+    calls: p.calls ? p.calls.set.length + p.calls.add.length : 0,
+    perSeller: p.per
+  };
+}
+function rnpApplyTable_(t, width) {
+  if (!t) return;
+  t.set.forEach(function (x) { t.sheet.getRange(x.i + 2, 3, 1, x.v.length).setValues([x.v]); });
+  if (t.add.length) {
+    const start = t.sheet.getLastRow() + 1;
+    t.sheet.getRange(start, 1, t.add.length, 1).setNumberFormat('@');
+    t.sheet.getRange(start, 1, t.add.length, width).setValues(t.add);
+  }
+}
+
 const ACTIONS = {
 
   /* ---- auth ---- */
@@ -1227,6 +1362,35 @@ const ACTIONS = {
     logAudit_('sellerRenamed', 'Seller', newName, oldName, newName + ' (' + moved + ' records updated)', actor_(session));
     return jsonOutput_({ ok: true, updated: moved });
   },
+
+  /* Admin: compare one month of ERP RNP data with the sheet (dryRun) or apply it.
+     Sales are written in one block: rows that no longer match are dropped and the
+     new ones added at the end. One audit line per sync. */
+  syncRnp: function (body, session) {
+    const p = rnpPlan_(body);
+    if (p.error) return fail_(p.error);
+    const sum = rnpSummary_(p);
+    if (body.dryRun === true || body.dryRun === 'true') return jsonOutput_({ ok: true, dryRun: true, summary: sum });
+    if (p.adds.length || p.dels.length) {
+      const drop = {};
+      p.dels.forEach(function (i) { drop[i] = 1; });
+      const all = p.eRows.filter(function (r, i) { return !drop[i]; }).concat(p.adds);
+      if (all.length) p.esh.getRange(2, 1, all.length, 7).setValues(all);
+      const gone = p.eRows.length - all.length;
+      if (gone > 0) {
+        const blank = [];
+        for (let i = 0; i < gone; i++) blank.push(['', '', '', '', '', '', '']);
+        p.esh.getRange(2 + all.length, 1, gone, 7).setValues(blank);
+      }
+    }
+    rnpApplyTable_(p.leads, 4);
+    rnpApplyTable_(p.calls, 3);
+    logAudit_('rnpSync', 'Month', p.month, '',
+      '+' + sum.add + ' sales (' + sum.addSum + '), -' + sum.del + ' sales (' + sum.delSum + '), ' +
+      sum.leads + ' lead days, ' + sum.calls + ' call days, ' + sum.sellers + ' sellers', actor_(session));
+    return jsonOutput_({ ok: true, summary: sum });
+  },
+
 
   /* Admin: make a seller their team's leader (body.leader = true) or a plain seller again.
      A leader keeps their own sales and pay, and can also see and manage the

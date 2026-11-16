@@ -2695,7 +2695,7 @@ function openStandardsFor(name, date){ ui.activityDate[name] = date; navigate('s
 
 function viewSettings(){
   if (!isAdmin()) return pageHead(esc(t('Settings')), esc(t('Settings')), '') + appearanceCard() + accountCard() + (DEMO ? demoCard() : '');
-  const tabs = [['pay', 'Plans & pay'], ['teams', 'Teams'], ['standards', 'Standards'], ['audit', 'Audit log'], ['appearance', 'Language & theme'], ['account', 'Account']];
+  const tabs = [['pay', 'Plans & pay'], ['teams', 'Teams'], ['standards', 'Standards'], ['rnpsync', 'Sync from RNP'], ['audit', 'Audit log'], ['appearance', 'Language & theme'], ['account', 'Account']];
   if (!tabs.some(x => x[0] === ui.settingsTab)) ui.settingsTab = 'pay';
   const tabRow = `<div class="tab-row" role="tablist">${tabs.map(([id, label]) =>
     `<button type="button" role="tab" aria-selected="${ui.settingsTab === id}" class="tab-btn ${ui.settingsTab === id ? 'active' : ''}" onclick="setSettingsTab('${id}')">${esc(t(label))}</button>`).join('')}</div>`;
@@ -2704,6 +2704,7 @@ function viewSettings(){
   else if (ui.settingsTab === 'teams') body = teamsCard();
   else if (ui.settingsTab === 'standards') body = standardsCard();
   else if (ui.settingsTab === 'audit') body = auditCard();
+  else if (ui.settingsTab === 'rnpsync') body = rnpSyncCard();
   else if (ui.settingsTab === 'appearance') body = appearanceCard();
   else body = accountCard() + (DEMO ? demoCard() : '');
   return pageHead(esc(t('Settings')), esc(t('Settings')), '') + tabRow + body;
@@ -3006,8 +3007,106 @@ const AUDIT_LABELS = {
   sellerCreated: 'Seller added', sellerEdited: 'Category / plan changed', sellerRenamed: 'Seller renamed', sellerDeleted: 'Seller removed',
   sellerLoginSet: 'Login set', sellerStartChanged: 'Start date changed', sellerDeactivated: 'Seller deactivated', sellerReactivated: 'Seller reactivated', sellerRestChanged: 'Rest day changed', sellerTeamChanged: 'Team changed', teamCreated: 'Team added', teamRenamed: 'Team renamed', teamDeleted: 'Team removed', sellerLoginRemoved: 'Login removed', planChanged: 'Team plan changed', payPlanChanged: 'Pay rules changed',
   standardCreated: 'Standard added', standardEdited: 'Standard edited', standardDeleted: 'Standard removed',
-  activityLogged: 'Standards logged', passwordChanged: 'Password changed', adminSetup: 'Admin created',
+  activityLogged: 'Standards logged', rnpSync: 'Synced from RNP', sellerRoleChanged: 'Role changed', passwordChanged: 'Password changed', adminSetup: 'Admin created',
 };
+/* ---------- Sync from RNP (admin) ----------
+   1) "Copy RNP data" bookmark on the ERP copies one month as text.
+   2) Paste it here → Preview (the server compares, changes nothing).
+   3) Apply → the server fixes the sheet in one request. */
+let rnpBookmarkHref = '';
+function loadRnpBookmark(){
+  if (rnpBookmarkHref || DEMO) return;
+  fetch('rnp-bookmarklet.js', { cache: 'no-cache' }).then(r => r.ok ? r.text() : '').then(code => {
+    if (!code) return;
+    rnpBookmarkHref = 'javascript:' + encodeURIComponent(code);
+    if (route.name === 'settings' && ui.settingsTab === 'rnpsync') render();
+  }).catch(() => {});
+}
+function rnpParsePasted(){
+  const el = document.getElementById('rnp-text');
+  const text = String(el ? el.value : ui.rnpText || '').trim();
+  ui.rnpText = text;
+  if (!text) return { error: t('Paste the data copied from the ERP first.') };
+  let d;
+  try { d = JSON.parse(text); } catch (e) { return { error: t('This is not the text from the “Copy RNP data” bookmark.') }; }
+  if (!d || d.kind !== 'sales-pace-rnp' || !Array.isArray(d.sellers)) return { error: t('This is not the text from the “Copy RNP data” bookmark.') };
+  return { data: d };
+}
+function rnpParts(){ return { sales: isChecked('rnp-sales'), leads: isChecked('rnp-leads'), calls: isChecked('rnp-calls') }; }
+async function rnpPreview(){
+  if (busy) return;
+  const p = rnpParsePasted();
+  ui.rnpPreview = null;
+  if (p.error){ errors.rnpsync = p.error; render(); return; }
+  ui.rnpParts = rnpParts();
+  busy = true; delete errors.rnpsync; render();
+  try{
+    const res = await apiPost({ action: 'syncRnp', dryRun: true, month: p.data.month, data: { sellers: p.data.sellers }, parts: ui.rnpParts });
+    if (res.ok) ui.rnpPreview = { month: p.data.month, at: p.data.at, summary: res.summary };
+    else if (!res.authError) errors.rnpsync = trServer(res.error) || t('Could not save. Please try again.');
+  }catch(e){ errors.rnpsync = networkErrorText(); }
+  busy = false; render();
+}
+async function rnpApply(){
+  const pv = ui.rnpPreview;
+  const p = rnpParsePasted();
+  if (!pv || p.error) return;
+  const res = await runAction({ action: 'syncRnp', month: p.data.month, data: { sellers: p.data.sellers }, parts: ui.rnpParts },
+    r => t('RNP {m} synced: +{a} sales, −{d} sales.', { m: p.data.month, a: r.summary.add, d: r.summary.del }), { formKey: 'rnpsync' });
+  if (res && res.ok){ ui.rnpPreview = null; ui.rnpDone = res.summary; ui.rnpText = ''; render(); }
+}
+function rnpSyncCard(){
+  loadRnpBookmark();
+  const pv = ui.rnpPreview;
+  const parts = ui.rnpParts || { sales: true, leads: true, calls: true };
+  const s = pv && pv.summary;
+  const nothing = s && !s.add && !s.del && !s.leads && !s.calls;
+  const perRows = s ? s.perSeller.map(x => `
+      <tr><td>${esc(x.name)}${x.erp !== x.name ? ` <span class="muted">(${esc(x.erp)})</span>` : ''}</td>
+        <td class="num">${fmt(x.sheetTotal)}</td><td class="num">${fmt(x.erpTotal)}</td>
+        <td class="num">${x.add ? '+' + fmt(x.add) : '—'}</td><td class="num">${x.del ? '−' + fmt(x.del) : '—'}</td></tr>`).join('') : '';
+  const preview = !s ? '' : `
+    <section class="card" aria-label="${esc(t('Preview'))}">
+      ${cardHead('check', esc(t('Preview · {m}', { m: pv.month })), `<span class="kicker">${esc(t('Copied {when}', { when: String(pv.at || '').slice(0, 16).replace('T', ' ') }))}</span>`)}
+      ${nothing ? `<p><strong>${esc(t('Everything already matches the RNP. Nothing to change.'))}</strong></p>` : `
+      <div class="stat-grid">
+        <div class="stat-tile"><div class="stat-label">${esc(t('Sales to add'))}</div><div class="stat-value num">${s.add}</div><div class="stat-sub">${money(s.addSum)}</div></div>
+        <div class="stat-tile"><div class="stat-label">${esc(t('Wrong sales to remove'))}</div><div class="stat-value num">${s.del}</div><div class="stat-sub">${money(s.delSum)}</div></div>
+        <div class="stat-tile"><div class="stat-label">${esc(t('Lead days to update'))}</div><div class="stat-value num">${s.leads}</div></div>
+        <div class="stat-tile"><div class="stat-label">${esc(t('Call-time days to update'))}</div><div class="stat-value num">${s.calls}</div></div>
+      </div>
+      ${perRows ? `<div class="table-wrap"><table class="table">
+        <thead><tr><th>${esc(t('Seller'))}</th><th class="num">${esc(t('Sheet'))}</th><th class="num">RNP</th><th class="num">${esc(t('Add'))}</th><th class="num">${esc(t('Remove'))}</th></tr></thead>
+        <tbody>${perRows}</tbody></table></div>` : ''}`}
+      ${s.unmatched.length ? `<p class="hint">${esc(t('In the RNP but not in Sales Pace (skipped): {names}. Add them as sellers, or type their ERP name in the sheet’s Sellers → ErpName column.', { names: s.unmatched.join(', ') }))}</p>` : ''}
+      <p class="hint">${esc(t('{n} sellers matched. Sellers not in the RNP (e.g. C class) are not touched.', { n: s.sellers }))}</p>
+      ${nothing ? '' : `<button type="button" class="btn" onclick="rnpApply()" ${busy ? 'disabled' : ''}>${icon('check')}<span>${esc(t('Apply these changes'))}</span></button>`}
+    </section>`;
+  const done = ui.rnpDone && !pv ? `<div class="banner" role="status"><span>${esc(t('Last sync: {m} · +{a} sales, −{d} sales, {l} lead days, {c} call-time days.', { m: ui.rnpDone.month, a: ui.rnpDone.add, d: ui.rnpDone.del, l: ui.rnpDone.leads, c: ui.rnpDone.calls }))}</span></div>` : '';
+  return `
+    <section class="card" aria-label="${esc(t('Sync from RNP'))}">
+      ${cardHead('refresh', esc(t('Sync from RNP')))}
+      <p>${esc(t('Makes the sheet match the ERP RNP for one month: sales (by product and payment), leads and call time. You see a preview before anything changes.'))}</p>
+      <ol class="steps">
+        <li><strong>${esc(t('Once:'))}</strong> ${DEMO ? esc(t('(not in the demo)')) : rnpBookmarkHref
+          ? `${esc(t('drag this button to your bookmarks bar:'))} <a class="btn btn-sm" href="${esc(rnpBookmarkHref)}" onclick="event.preventDefault(); showToast(t('Drag it to the bookmarks bar, then click it on the ERP page.'), 'info')">${icon('bolt')}<span>Copy RNP data</span></a>`
+          : esc(t('loading the bookmark…'))}</li>
+        <li>${esc(t('Open the ERP (logged in), click the “Copy RNP data” bookmark, choose the month, wait, then press Copy.'))}</li>
+        <li>${esc(t('Paste it below and press Preview.'))}</li>
+      </ol>
+      ${errorHtml('rnpsync')}
+      <div class="field"><label for="rnp-text">${esc(t('Pasted RNP data'))}</label>
+        <textarea id="rnp-text" class="rnp-text" rows="3" spellcheck="false" placeholder="{&quot;kind&quot;:&quot;sales-pace-rnp&quot;, …}" oninput="ui.rnpText=this.value; ui.rnpPreview=null">${esc(ui.rnpText || '')}</textarea></div>
+      <div class="button-row rnp-parts">
+        <label class="check"><input type="checkbox" id="rnp-sales" ${parts.sales ? 'checked' : ''}> ${esc(t('Sales'))}</label>
+        <label class="check"><input type="checkbox" id="rnp-leads" ${parts.leads ? 'checked' : ''}> ${esc(t('Leads'))}</label>
+        <label class="check"><input type="checkbox" id="rnp-calls" ${parts.calls ? 'checked' : ''}> ${esc(t('Call time'))}</label>
+      </div>
+      <div class="button-row"><button type="button" class="btn btn-ghost" onclick="rnpPreview()" ${busy ? 'disabled' : ''}>${icon('eye')}<span>${esc(t('Preview'))}</span></button></div>
+    </section>
+    ${done}${preview}`;
+}
+
 function auditCard(){
   if (!data.auditLog.length) return `<section class="card">${cardHead('shield', esc(t('Audit log')))}<p>${esc(t('No changes recorded yet.'))}</p></section>`;
   const rows = data.auditLog.slice(0, 200).map(a => {
