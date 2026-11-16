@@ -678,7 +678,10 @@ function publicConfig_(cfg) {
 
 function doGet(e) {
   const session = readSession_(e && e.parameter ? e.parameter.token : null);
-  const isAdmin = !!session && session.role === 'admin';
+  // Nothing about sales, sellers, teams or plans leaves the server without a
+  // login: guests only learn whether an admin account exists (for first setup).
+  if (!session) return jsonOutput_({ locked: true, adminExists: ensureAdminSheet_().getLastRow() > 1, me: null });
+  const isAdmin = session.role === 'admin';
 
   const planRows = readPlanRows_();
   const payBase = planRows.length ? null : legacyBase_();

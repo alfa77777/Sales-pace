@@ -695,8 +695,8 @@ function renderToast(){
 /* ---------- routing ---------- */
 
 const ROUTES = {
-  dashboard:   { access: 'public', icon: 'home',     label: 'Dashboard' },
-  leaderboard: { access: 'public', icon: 'trophy',   label: 'Leaderboard' },
+  dashboard:   { access: 'user',   icon: 'home',     label: 'Dashboard' },
+  leaderboard: { access: 'user',   icon: 'trophy',   label: 'Leaderboard' },
   mysales:     { access: 'seller', icon: 'chart',    label: 'My sales & pay' },
   myentries:   { access: 'seller', icon: 'receipt',  label: 'My entries' },
   standards:   { access: 'seller', icon: 'check',    label: 'Daily standards' },
@@ -744,7 +744,7 @@ function canAccess(name){
   if (a === 'manager') return isManager();
   return session.role === a;
 }
-function homeFor(){ return isSeller() ? 'mysales' : 'dashboard'; }
+function homeFor(){ return !session ? 'login' : isSeller() ? 'mysales' : 'dashboard'; }
 function resolveRoute(r){
   if (canAccess(r.name)) return r;
   if (!session && r.name !== 'login'){ afterLogin = r; return { name: 'login', params: {} }; }
@@ -787,7 +787,7 @@ function toggleSidebar(force){
 }
 
 function navItemsFor(){
-  if (!session) return ['dashboard', 'leaderboard'];
+  if (!session) return [];
   if (isLeader()) return ['dashboard', 'leaderboard', 'mysales', 'myentries', 'standards', 'team', 'entries', 'salaries', 'compliance', 'rnp', 'settings'];
   if (session.role === 'seller') return ['dashboard', 'leaderboard', 'mysales', 'myentries', 'standards', 'settings'];
   return ['dashboard', 'leaderboard', 'entries', 'team', 'salaries', 'compliance', 'rnp', 'settings'];
@@ -915,6 +915,8 @@ function markLoaded(){
 /* ---------- shell ---------- */
 
 function renderShell(){
+  // Not logged in: only the welcome + login screen, no menu, no team data.
+  if (!session) return `<div class="welcome-shell">${renderWelcome()}</div>${renderModal()}`;
   return `
   <div class="app ${sidebarOpen ? 'sidebar-open' : ''}">
     ${renderSidebar()}
@@ -926,6 +928,62 @@ function renderShell(){
     ${renderBottomNav()}
   </div>
   ${renderModal()}`;
+}
+
+
+function renderWelcome(){
+  const dark = currentTheme() === 'dark';
+  const ab = authBanner ? `<div class="banner banner-${authBanner.type}" role="${authBanner.type === 'error' ? 'alert' : 'status'}">${esc(authBanner.text)}</div>` : '';
+  const setup = loaded && !data.adminExists;
+  const form = setup ? `
+        <h2>${esc(t('Set up admin access'))}</h2>
+        <p class="muted">${esc(t('No admin account exists yet. You’re creating it now.'))}</p>
+        ${ab}
+        <div class="field"><label for="setup-username">${esc(t('Username'))}</label><input type="text" id="setup-username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false"></div>
+        <div class="field"><label for="setup-password">${esc(t('Password'))}</label><input type="password" id="setup-password" autocomplete="new-password"></div>
+        <div class="field"><label for="setup-password-confirm">${esc(t('Confirm password'))}</label><input type="password" id="setup-password-confirm" autocomplete="new-password" onkeydown="if(event.key==='Enter')attemptAdminSetup()"></div>
+        <button type="button" class="btn btn-block" onclick="attemptAdminSetup()" ${authBusy ? 'disabled' : ''}>${esc(authBusy ? t('Creating…') : t('Create admin account'))}</button>` : `
+        <h2>${esc(t('Log in'))}</h2>
+        <p class="muted">${esc(t('Sellers, team leaders and the admin use the same login.'))}</p>
+        ${ab}
+        <div class="field"><label for="login-username">${esc(t('Username'))}</label><input type="text" id="login-username" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false"></div>
+        <div class="field"><label for="login-password">${esc(t('Password'))}</label><input type="password" id="login-password" autocomplete="current-password" onkeydown="if(event.key==='Enter')attemptLogin()"></div>
+        <button type="button" class="btn btn-block" onclick="attemptLogin()" ${authBusy ? 'disabled' : ''}>${esc(authBusy ? t('Logging in…') : t('Log in'))}</button>
+        <p class="hint">${esc(t('You’ll stay logged in on this device for 7 days, until you log out. No login yet? Ask your admin.'))}</p>`;
+  const feats = [
+    ['target', t('Pace to plan'), t('See every day how far you are from your monthly plan.')],
+    ['wallet', t('Pay you can see'), t('Your salary tier updates with every sale.')],
+    ['crown', t('Team race'), t('Teams compete week by week.')],
+  ];
+  const demo = DEMO ? `
+      <section class="card welcome-demo">
+        ${cardHead('bolt', esc(t('Demo accounts')))}
+        <div class="demo-accounts">
+          ${window.SalesPaceDemo.accounts.map(a => `
+            <button type="button" class="demo-acc ${a.role === 'admin' ? 'admin' : ''}" onclick="demoLogin(${jsArg(a.username)})" ${authBusy ? 'disabled' : ''}>
+              <b>${a.role === 'admin' ? esc(t('Admin — full control')) : esc(a.name) + (a.role === 'leader' ? ' · ' + esc(t('Team leader')) : '')}</b>
+              <span>${esc(a.username)}${a.note ? ' · ' + esc(t(a.note)) : ''}</span>
+            </button>`).join('')}
+        </div>
+      </section>` : '';
+  return `
+    <div class="welcome-top">
+      <div class="brand">${icon('bolt')}<span>SALES <b>PACE</b></span></div>
+      <div class="welcome-tools">
+        <button type="button" class="icon-btn" onclick="toggleLang()" aria-label="${esc(lang === 'en' ? 'O‘zbek tiliga o‘tish' : 'Switch to English')}">${lang === 'en' ? 'UZ' : 'EN'}</button>
+        <button type="button" class="icon-btn" onclick="toggleTheme()" aria-label="${esc(dark ? t('Switch to light theme') : t('Switch to dark theme'))}">${icon(dark ? 'sun' : 'moon')}</button>
+      </div>
+    </div>
+    <main class="welcome" id="main-content">
+      <section class="welcome-hero">
+        <p class="kicker">${esc(t('Englify sales team'))}</p>
+        <h1>${esc(t('Welcome to Sales Pace'))}</h1>
+        <p class="welcome-lead">${esc(t('Your sales, plan, pay and team — in one place. Log in to see them.'))}</p>
+        <ul class="welcome-feats">${feats.map(f => `<li>${icon(f[0])}<div><strong>${esc(f[1])}</strong><span>${esc(f[2])}</span></div></li>`).join('')}</ul>
+      </section>
+      <section class="card slash welcome-login">${form}</section>
+      ${demo}
+    </main>`;
 }
 
 function renderSidebar(){
@@ -1010,7 +1068,7 @@ function renderTopbar(){
 
 function renderBottomNav(){
   let items;
-  if (!session) items = ['dashboard', 'leaderboard', 'login'];
+  if (!session) return '';
   else if (isLeader()) items = ['mysales', 'team', 'add', 'entries', 'more'];
   else if (isSeller()) items = ['dashboard', 'mysales', 'add', 'myentries', 'more'];
   else items = ['dashboard', 'salaries', 'add', 'entries', 'more'];
