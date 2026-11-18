@@ -2611,7 +2611,8 @@ function raceWeeks(m){
 function raceRows(mon){
   const sun = addDaysStr(mon, 6);
   const inWeek = (x) => x.date >= mon && x.date <= sun;
-  const rows = teamsList().map(tm => {
+  // "No team" (sellers the ERP has in no team) is not in the race.
+  const rows = teamsList().filter(tm => tm.name.trim().toLowerCase() !== 'no team').map(tm => {
     const ents = teamEntries(tm.id).filter(inWeek);
     const members = new Set(teamMembers(tm.id).map(s => s.name));
     return {
@@ -3220,7 +3221,7 @@ function rnpSyncCard(){
   const pv = ui.rnpPreview;
   const parts = Object.assign({ sales: true, leads: true, calls: true, sellers: true, teams: true }, ui.rnpParts || {});
   const s = pv && pv.summary;
-  const nothing = s && !s.add && !s.del && !s.leads && !s.calls && !(s.newSellers || []).length && !(s.moves || []).length;
+  const nothing = s && !s.add && !s.del && !s.leads && !s.calls && !(s.newSellers || []).length && !(s.moves || []).length && !(s.links || []).length;
   const perRows = s ? s.perSeller.map(x => `
       <tr><td>${esc(x.name)}${x.erp !== x.name ? ` <span class="muted">(${esc(x.erp)})</span>` : ''}</td>
         <td class="num">${fmt(x.sheetTotal)} <span class="muted">· ${fmt(x.sheetCount || 0)}</span></td><td class="num">${fmt(x.erpTotal)} <span class="muted">· ${fmt(x.erpCount || 0)}</span></td>
@@ -3240,6 +3241,7 @@ function rnpSyncCard(){
         <tbody>${perRows}</tbody></table></div>` : ''}`}
       ${(s.newSellers || []).length ? `<p><strong>${esc(t('New sellers to add:'))}</strong> ${esc(s.newSellers.join(', '))}</p>` : ''}
       ${(s.moves || []).length ? `<p><strong>${esc(t('Team changes:'))}</strong> ${esc(s.moves.join(', '))}</p>` : ''}
+      ${(s.links || []).length ? `<p><strong>${esc(t('Linked to their ERP name:'))}</strong> ${esc(s.links.join(', '))}</p>` : ''}
       ${s.unmatched.length ? `<p class="hint">${esc(t('In the RNP but not in Sales Pace (skipped): {names}. Add them as sellers, or type their ERP name in the sheet’s Sellers → ErpName column.', { names: s.unmatched.join(', ') }))}</p>` : ''}
       <p class="hint">${esc(t('{n} sellers matched. Sellers not in the RNP are not touched.', { n: s.sellers }))}</p>
       ${s.totals ? `<p class="hint">${esc(t('The ERP month totals (sales count, calls) of {n} sellers are saved too.', { n: s.totals }))}</p>` : ''}

@@ -962,6 +962,8 @@ const UZ = {
   "Save ERP month totals": "ERP oylik jamilarini saqlash",
   "Calls & call time": "Qo'ng'iroqlar va vaqti",
   "Calls (RNP)": "Qo'ng'iroqlar (RNP)",
+  "Linked to their ERP name:": "ERP dagi ismiga bog'landi:",
+  "No team": "Jamoasiz",
   "Add missing sellers": "Yo'q sotuvchilarni qo'shish",
   "Update teams": "Jamoalarni yangilash",
   "Makes the sheet match the ERP RNP for one month: sellers and teams, sales (by product and payment), leads, calls and call time. You see a preview before anything changes.": "Bir oy uchun jadvalni ERP RNP bilan bir xil qiladi: sotuvchilar va jamoalar, sotuvlar (mahsulot va to'lov bo'yicha), leadlar, qo'ng'iroqlar va vaqti. O'zgarishdan oldin ko'rib chiqasiz.",

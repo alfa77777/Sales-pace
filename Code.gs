@@ -84,6 +84,10 @@ const PRODUCTS = ['Prepayment', "Bo'talog'im", "Jo'shqin", 'Uchqun', 'Math', 'Mi
 const PAYMENTS = ['Payme', 'Click', 'Uzum_pay', 'Paynet', 'Octo', 'Open bank', 'Bank', 'Uzcard', 'Paylov', 'Uzum_nasiya', 'Alif mobile', 'Anor nasiya', 'Paylater', 'Variant', 'Yandex split', 'Tozamoliya'];
 const MAX_LEADS = 100000;
 const DEFAULT_TEAM = '1';
+// Sellers whose ERP team is "Not Set": the ERP counts them in no team, so Sync from RNP
+// puts them in this team (created when first needed) and it is left out of the weekly race.
+const NO_TEAM_NAME = 'No team';
+const NO_TEAM_NEW = 'new:no-team';
 const MAX_TEAMS = 20;
 
 /* Starting pay rules. The admin changes them in the app (Settings → Plans & pay). */
@@ -956,7 +960,28 @@ function rnpPlan_(body) {
       if (String(r[11] || '').trim()) byKey[String(r[11]).trim().toLowerCase()] = n;
     });
   }
-  const matched = {}, unmatched = [], newSellers = [], moves = [];
+  const matched = {}, unmatched = [], newSellers = [], moves = [], links = [];
+  const noTeam = teamByName[NO_TEAM_NAME.toLowerCase()] || NO_TEAM_NEW;
+  const erpTeamOf = function (x) {
+    const tn = String(x && x.team || '').trim().toLowerCase();
+    if (!tn || tn === 'not set') return noTeam;
+    return teamByName[tn] || '';
+  };
+  // A seller kept under a short name ("Shaxboz") and never linked to the ERP: link them
+  // to the one ERP seller with that first name instead of adding a duplicate.
+  const hasErp = {};
+  if (ssh.getLastRow() > 1) ssh.getRange(2, 1, ssh.getLastRow() - 1, 12).getValues().forEach(function (r) { if (r[0] !== '' && String(r[11] || '').trim()) hasErp[String(r[0])] = 1; });
+  const exact = {};
+  list.forEach(function (x) { const e = String(x && x.erp || '').trim().toLowerCase(); if (byKey[e]) exact[byKey[e]] = 1; });
+  const first = function (n) { return String(n).trim().split(/\s+/)[0].toLowerCase(); };
+  const firstCount = {};
+  list.forEach(function (x) { const e = String(x && x.erp || '').trim(); if (e && !byKey[e.toLowerCase()]) firstCount[first(e)] = (firstCount[first(e)] || 0) + 1; });
+  const shortOf = {};
+  Object.keys(teamOf).forEach(function (n) {
+    if (hasErp[n] || exact[n] || /\s/.test(n.trim())) return;
+    const k = n.trim().toLowerCase();
+    shortOf[k] = shortOf[k] ? '' : n; // '' = two sellers share the name: don't guess
+  });
   const hasSales = function (days) {
     return Object.keys(days || {}).some(function (d) { return inMonth(d) && Object.keys((days[d] || {}).p || {}).some(function (k) { return rnpNum_((days[d].p[k] || [])[0]) > 0; }); });
   };
@@ -965,9 +990,13 @@ function rnpPlan_(body) {
     if (!erp) return;
     const days = x.days && typeof x.days === 'object' ? x.days : {};
     const cls = SALE_CLASSES.indexOf(String(x.cls || '')) !== -1 ? String(x.cls) : '';
-    const erpTeam = teamByName[String(x.team || '').trim().toLowerCase()] || '';
+    const erpTeam = erpTeamOf(x);
     let name = byKey[erp.toLowerCase()];
-    if (!name) {
+    if (!name && firstCount[first(erp)] === 1 && shortOf[first(erp)]) {
+      name = shortOf[first(erp)];
+      links.push({ name: name, erp: erp });
+      if (doMove && erpTeam && teamOf[name] && erpTeam !== teamOf[name]) moves.push({ name: name, from: teamOf[name], to: erpTeam });
+    } else if (!name) {
       // Not in Sales Pace: add them if they sold something this month.
       if (doAdd && hasSales(days) && erp.length <= 60) {
         newSellers.push({ name: erp, team: erpTeam || DEFAULT_TEAM, start: rnpHireDate_(x.hired), rest: rnpRestDay_(x.rest) });
@@ -1053,17 +1082,18 @@ function rnpPlan_(body) {
   const calls = doCalls ? dayTable(ensureCallTimeSheet_(), function (e) { return [Math.min(rnpNum_(e.min), MAX_CALL_MINUTES), rnpNum_(e.calls)]; }, 4) : null;
 
   return {
-    month: month, matched: matched, unmatched: unmatched, newSellers: newSellers, moves: moves, teams: teams,
+    month: month, matched: matched, unmatched: unmatched, newSellers: newSellers, moves: moves, links: links, teams: teams,
     adds: adds, dels: dels, eRows: eRows, esh: esh, leads: leads, calls: calls,
     per: Object.keys(per).map(function (k) { return per[k]; }).filter(function (o) { return o.add || o.del; })
   };
 }
 function rnpSummary_(p) {
-  const tn = function (id) { const t = p.teams.filter(function (x) { return x.id === id; })[0]; return t ? t.name : id; };
+  const tn = function (id) { if (id === NO_TEAM_NEW) return NO_TEAM_NAME; const t = p.teams.filter(function (x) { return x.id === id; })[0]; return t ? t.name : id; };
   return {
     month: p.month, sellers: Object.keys(p.matched).length, unmatched: p.unmatched,
     newSellers: p.newSellers.map(function (s) { return s.name + ' → ' + tn(s.team); }),
     moves: p.moves.map(function (m) { return m.name + ': ' + tn(m.from) + ' → ' + tn(m.to); }),
+    links: p.links.map(function (l) { return l.name + ' = ' + l.erp; }),
     add: p.adds.length, addSum: p.adds.reduce(function (s, r) { return s + r[2]; }, 0),
     del: p.dels.length, delSum: p.dels.reduce(function (s, i) { return s + (Number(p.eRows[i][2]) || 0); }, 0),
     leads: p.leads ? p.leads.set.length + p.leads.add.length : 0,
@@ -1097,6 +1127,24 @@ function rnpApplyTotals_(p) {
 }
 function rnpApplySellers_(p) {
   const sheet = ensureSellersSheet_();
+  // Create the "No team" team when a seller needs it.
+  const needs = p.newSellers.some(function (s) { return s.team === NO_TEAM_NEW; }) || p.moves.some(function (m) { return m.to === NO_TEAM_NEW; });
+  if (needs) {
+    const teams = readTeams_();
+    let t = teams.filter(function (x) { return x.name.toLowerCase() === NO_TEAM_NAME.toLowerCase(); })[0];
+    if (!t) {
+      const id = String(teams.reduce(function (m, x) { return Math.max(m, Number(x.id) || 0); }, 0) + 1);
+      const tsh = ensureTeamsSheet_();
+      const r = tsh.getRange(tsh.getLastRow() + 1, 1, 1, 2); r.setNumberFormat('@'); r.setValues([[id, NO_TEAM_NAME]]);
+      t = { id: id };
+    }
+    p.newSellers.forEach(function (s) { if (s.team === NO_TEAM_NEW) s.team = t.id; });
+    p.moves.forEach(function (m) { if (m.to === NO_TEAM_NEW) m.to = t.id; });
+  }
+  p.links.forEach(function (l) {
+    const row = findRow_(sheet, 1, l.name);
+    if (row !== -1) sheet.getRange(row, 12).setValue(l.erp);
+  });
   p.newSellers.forEach(function (s) {
     if (findRow_(sheet, 1, s.name) !== -1) return;
     sheet.appendRow([s.name, 0, '', '', '', 'OTHER', s.start, '', s.rest, s.team]);
@@ -1528,7 +1576,8 @@ const ACTIONS = {
     logAudit_('rnpSync', 'Month', p.month, '',
       '+' + sum.add + ' sales (' + sum.addSum + '), -' + sum.del + ' sales (' + sum.delSum + '), ' +
       sum.leads + ' lead days, ' + sum.calls + ' call days, ' + sum.sellers + ' sellers' +
-      (sum.newSellers.length ? '; new: ' + sum.newSellers.join(', ') : '') + (sum.moves.length ? '; moved: ' + sum.moves.join(', ') : ''), actor_(session));
+      (sum.newSellers.length ? '; new: ' + sum.newSellers.join(', ') : '') + (sum.moves.length ? '; moved: ' + sum.moves.join(', ') : '') +
+      (sum.links.length ? '; linked: ' + sum.links.join(', ') : ''), actor_(session));
     return jsonOutput_({ ok: true, summary: sum });
   },
 
