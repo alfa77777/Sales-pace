@@ -949,4 +949,20 @@ const UZ = {
   "Englify sales team": "Englify sotuv jamoasi",
   "Welcome to Sales Pace": "Sales Pace ga xush kelibsiz",
   "Your sales, plan, pay and team — in one place. Log in to see them.": "Sotuvlaringiz, rejangiz, maoshingiz va jamoangiz — bir joyda. Ko'rish uchun tizimga kiring.",
+
+  /* RNP sync: ERP month totals */
+  "{n} sellers matched. Sellers not in the RNP are not touched.": "{n} ta sotuvchi mos keldi. RNP da yo'q sotuvchilarga tegilmaydi.",
+  "ERP month total": "ERP oylik jami",
+  "Month counts are the ERP’s own month totals. The ERP counts a student who paid on two days, or a number called on two days, once, so they can be smaller than the sum of the days.": "Oylik sonlar — ERP ning o'z oylik jamisi. ERP ikki kunda to'lagan o'quvchini yoki ikki kunda qo'ng'iroq qilingan raqamni bir marta sanaydi, shuning uchun ular kunlar yig'indisidan kichik bo'lishi mumkin.",
+  "{n} call": "{n} ta qo'ng'iroq",
+  "{n} calls": "{n} ta qo'ng'iroq",
+  "New sellers to add:": "Qo'shiladigan yangi sotuvchilar:",
+  "Team changes:": "Jamoa o'zgarishlari:",
+  "The ERP month totals (sales count, calls) of {n} sellers are saved too.": "{n} ta sotuvchining ERP oylik jamilari (sotuvlar soni, qo'ng'iroqlar) ham saqlanadi.",
+  "Save ERP month totals": "ERP oylik jamilarini saqlash",
+  "Calls & call time": "Qo'ng'iroqlar va vaqti",
+  "Calls (RNP)": "Qo'ng'iroqlar (RNP)",
+  "Add missing sellers": "Yo'q sotuvchilarni qo'shish",
+  "Update teams": "Jamoalarni yangilash",
+  "Makes the sheet match the ERP RNP for one month: sellers and teams, sales (by product and payment), leads, calls and call time. You see a preview before anything changes.": "Bir oy uchun jadvalni ERP RNP bilan bir xil qiladi: sotuvchilar va jamoalar, sotuvlar (mahsulot va to'lov bo'yicha), leadlar, qo'ng'iroqlar va vaqti. O'zgarishdan oldin ko'rib chiqasiz.",
 };

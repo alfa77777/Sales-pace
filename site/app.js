@@ -100,7 +100,7 @@ function trServer(msg){
 
 /* ---------- state ---------- */
 
-const data = { plan: 0, sellers: [], entries: [], standards: [], activity: [], calls: [], auditLog: [], adminExists: true, payConfigs: [], payBase: null, teamPlans: {} };
+const data = { plan: 0, sellers: [], entries: [], standards: [], activity: [], calls: [], rnpTotals: [], auditLog: [], adminExists: true, payConfigs: [], payBase: null, teamPlans: {} };
 let callIndex = new Map();
 let dataVersion = 0;
 let leadIndex = new Map();
@@ -573,7 +573,8 @@ function applyData(d){
   data.teams = Array.isArray(d.teams) ? d.teams.map(x => ({ id: String(x.id), name: String(x.name || '') })) : [];
   activityIndex = new Map();
   data.activity.forEach(a => activityIndex.set(a.date + '\u0001' + a.seller + '\u0001' + a.standard, a));
-  data.calls = (d.calls || []).map(c => ({ date: String(c.date), seller: String(c.seller), minutes: Number(c.minutes) || 0 }));
+  data.calls = (d.calls || []).map(c => ({ date: String(c.date), seller: String(c.seller), minutes: Number(c.minutes) || 0, count: Number(c.count) || 0 }));
+  data.rnpTotals = (d.rnpTotals || []).map(x => ({ month: String(x.month), seller: String(x.seller), count: Number(x.count) || 0, calls: Number(x.calls) || 0, prod: x.prod && typeof x.prod === 'object' ? x.prod : {} }));
   callIndex = new Map();
   data.calls.forEach(c => callIndex.set(c.date + '\u0001' + c.seller, c.minutes));
   dataVersion++;
@@ -2661,6 +2662,20 @@ function renderWeeklyRace(m){
       ${history ? `<details class="race-history"><summary>${esc(t('Winners this month'))}</summary><div class="table-wrap"><table class="table"><thead><tr><th>${esc(t('Week'))}</th><th>${esc(t('Winner'))}</th><th class="num">${esc(t('Sales (so‘m)'))}</th></tr></thead><tbody>${history}</tbody></table></div></details>` : ''}
     </section>`;
 }
+// The ERP RNP's own month summary (from Sync from RNP) for these sellers, or null when
+// a seller with sales or calls this month has none yet. The ERP counts a student who
+// paid on two days (or a number called on two days) once, so its month counts are
+// smaller than the sum of its day cells; showing them keeps the Month column equal to the ERP.
+function erpMonthTotals(names, m, ents, calls){
+  const rows = data.rnpTotals.filter(x => x.month === m && names.indexOf(x.seller) !== -1);
+  if (!rows.length) return null;
+  const have = new Set(rows.map(x => x.seller));
+  const active = new Set(ents.map(e => e.seller).concat(calls.filter(c => c.minutes || c.count).map(c => c.seller)));
+  for (const n of active) if (!have.has(n)) return null;
+  const prod = {};
+  rows.forEach(x => Object.keys(x.prod).forEach(k => { prod[k] = (prod[k] || 0) + (Number(x.prod[k]) || 0); }));
+  return { count: rows.reduce((a, x) => a + x.count, 0), calls: rows.reduce((a, x) => a + x.calls, 0), prod };
+}
 function viewRnp(){
   const m = viewMonth();
   const team = curTeam();
@@ -2673,6 +2688,9 @@ function viewRnp(){
   const leads = data.leads.filter(l => nameSet.has(l.seller) && l.date.startsWith(m));
   const acts = data.activity.filter(a => nameSet.has(a.seller) && a.date.startsWith(m));
   const plan = seller ? sellerInfo(seller, m).plan : teamPlanFor(m, team);
+  const erp = erpMonthTotals(names, m, ents, calls);
+  const salesCount = erp ? erp.count : ents.length;
+  const erpMark = erp ? ` <span class="erp-mark" title="${esc(t('ERP month total'))}">ERP</span>` : '';
   const weekly = ui.rnpWeekly;
   const cols = rnpColumns(m, weekly);
   const inCol = (date, c) => date >= c.from && date <= c.to;
@@ -2686,16 +2704,20 @@ function viewRnp(){
   productList().forEach(p => {
     const mine = ents.filter(e => e.product === p);
     add('products', t('{p} — amount', { p }), c => money0(sumIn(mine, c, e => e.amount)), money0(sumAmounts(mine)), false);
-    add('products', t('{p} — count', { p }), c => num0(sumIn(mine, c, () => 1)), num0(mine.length), false);
+    const pn = erp ? (erp.prod[p] || 0) : mine.length;
+    add('products', t('{p} — count', { p }), c => num0(sumIn(mine, c, () => 1)), pn ? fmt(pn) + erpMark : num0(0), false);
   });
   const noProd = ents.filter(e => !e.product);
   if (noProd.length) add('products', t('Product not set — amount'), c => money0(sumIn(noProd, c, e => e.amount)), money0(sumAmounts(noProd)), true);
   // totals, leads, calls
-  add('totals', t('Total sales count'), c => num0(sumIn(ents, c, () => 1)), num0(ents.length), true);
+  add('totals', t('Total sales count'), c => num0(sumIn(ents, c, () => 1)), salesCount ? fmt(salesCount) + erpMark : num0(0), true);
   add('totals', t('Total amount'), c => `<strong>${money0(sumIn(ents, c, e => e.amount))}</strong>`, `<strong>${money0(sumAmounts(ents))}</strong>`, true);
   const takenTot = leads.reduce((a, l) => a + l.taken, 0), contTot = leads.reduce((a, l) => a + l.contacted, 0);
-  add('totals', t('Leads taken'), c => { const n = sumIn(leads, c, l => l.taken); return n ? fmt(n) + pctOf(sumIn(ents, c, () => 1), n) : num0(0); }, takenTot ? fmt(takenTot) + pctOf(ents.length, takenTot) : num0(0), true);
-  add('totals', t('Leads contacted'), c => { const n = sumIn(leads, c, l => l.contacted); return n ? fmt(n) + pctOf(sumIn(ents, c, () => 1), n) : num0(0); }, contTot ? fmt(contTot) + pctOf(ents.length, contTot) : num0(0), true);
+  add('totals', t('Leads taken'), c => { const n = sumIn(leads, c, l => l.taken); return n ? fmt(n) + pctOf(sumIn(ents, c, () => 1), n) : num0(0); }, takenTot ? fmt(takenTot) + pctOf(salesCount, takenTot) : num0(0), true);
+  add('totals', t('Leads contacted'), c => { const n = sumIn(leads, c, l => l.contacted); return n ? fmt(n) + pctOf(sumIn(ents, c, () => 1), n) : num0(0); }, contTot ? fmt(contTot) + pctOf(salesCount, contTot) : num0(0), true);
+  const callsTot = erp ? erp.calls : calls.reduce((a, x) => a + x.count, 0);
+  const callsLabel = data.standards.some(std => std.name.trim().toLowerCase() === t('Calls').toLowerCase() || std.name.trim().toLowerCase() === 'calls') ? t('Calls (RNP)') : t('Calls');
+  add('totals', callsLabel, c => num0(sumIn(calls, c, x => x.count)), callsTot ? fmt(callsTot) + erpMark : num0(0), true);
   add('totals', t('Call time'), c => { const v = sumIn(calls, c, x => x.minutes); return v ? fmtHM(v) : '<span class="muted">—</span>'; }, fmtHM(calls.reduce((a, x) => a + x.minutes, 0)), true);
   data.standards.forEach(std => {
     const mine = acts.filter(a => a.standard === std.name);
@@ -2744,10 +2766,10 @@ function viewRnp(){
     + rnpBoard(m, team)
     + (seller ? rnpSellerCard(seller, m) : '')
     + `<section class="stat-grid" aria-label="${esc(t('Totals'))}">
-        <div class="stat-tile"><div class="stat-label">${esc(t('Total amount'))}</div><div class="stat-value num">${fmt(sold)}</div><div class="stat-sub">${esc(cnt(ents.length, '{n} sale', '{n} sales'))}</div></div>
+        <div class="stat-tile"><div class="stat-label">${esc(t('Total amount'))}</div><div class="stat-value num">${fmt(sold)}</div><div class="stat-sub">${esc(cnt(salesCount, '{n} sale', '{n} sales'))}</div></div>
         <div class="stat-tile"><div class="stat-label">${esc(t('Target'))}</div><div class="stat-value num">${plan ? fmt(plan) : '—'}</div><div class="stat-sub">${esc(plan ? t('Progress {p}%', { p: Math.round(sold / plan * 100) }) : t('No plan'))}</div></div>
-        <div class="stat-tile"><div class="stat-label">${esc(t('Leads → sales'))}</div><div class="stat-value num">${takenTot ? (ents.length / takenTot * 100).toFixed(1) + '%' : '—'}</div><div class="stat-sub">${esc(t('{n} leads taken', { n: fmt(takenTot) }))} · ${esc(t('contacted {p}', { p: contTot ? (ents.length / contTot * 100).toFixed(1) + '%' : '—' }))}</div></div>
-        <div class="stat-tile"><div class="stat-label">${esc(t('Call time'))}</div><div class="stat-value num">${fmtHM(calls.reduce((a, x) => a + x.minutes, 0))}</div><div class="stat-sub">${esc(t('h:mm this month'))}</div></div>
+        <div class="stat-tile"><div class="stat-label">${esc(t('Leads → sales'))}</div><div class="stat-value num">${takenTot ? (salesCount / takenTot * 100).toFixed(1) + '%' : '—'}</div><div class="stat-sub">${esc(t('{n} leads taken', { n: fmt(takenTot) }))} · ${esc(t('contacted {p}', { p: contTot ? (salesCount / contTot * 100).toFixed(1) + '%' : '—' }))}</div></div>
+        <div class="stat-tile"><div class="stat-label">${esc(t('Call time'))}</div><div class="stat-value num">${fmtHM(calls.reduce((a, x) => a + x.minutes, 0))}</div><div class="stat-sub">${esc(t('h:mm this month'))}${callsTot ? ' · ' + esc(cnt(callsTot, '{n} call', '{n} calls')) : ''}</div></div>
       </section>
       <div class="grid-2">
         <section class="card" aria-label="${esc(t('By product'))}">${cardHead('layers', esc(t('By product')))}<div class="mix">${bars(prodTotals, x => x.p)}</div></section>
@@ -2759,6 +2781,7 @@ function viewRnp(){
           <thead><tr><th scope="col">${esc(monthLabel(m))}</th><th scope="col">${esc(t('Month'))}</th>${cols.map(c => `<th scope="col">${esc(c.label)}</th>`).join('')}</tr></thead>
           <tbody>${body}</tbody>
         </table></div>
+        ${erp ? `<p class="hint"><span class="erp-mark">ERP</span> ${esc(t('Month counts are the ERP’s own month totals. The ERP counts a student who paid on two days, or a number called on two days, once, so they can be smaller than the sum of the days.'))}</p>` : ''}
         <label class="check" style="margin-top:12px"><input type="checkbox" id="rnp-empty" ${ui.rnpEmpty ? 'checked' : ''} onchange="ui.rnpEmpty=this.checked;render({fresh:true})"> ${esc(t('Show empty product and payment rows'))}${hidden ? ` <span class="muted">(${esc(t('{n} hidden', { n: hidden }))})</span>` : ''}</label>
       </section>`;
 }
@@ -3169,7 +3192,7 @@ function rnpParsePasted(){
   if (!d || d.kind !== 'sales-pace-rnp' || !Array.isArray(d.sellers)) return { error: t('This is not the text from the “Copy RNP data” bookmark.') };
   return { data: d };
 }
-function rnpParts(){ return { sales: isChecked('rnp-sales'), leads: isChecked('rnp-leads'), calls: isChecked('rnp-calls') }; }
+function rnpParts(){ return { sales: isChecked('rnp-sales'), leads: isChecked('rnp-leads'), calls: isChecked('rnp-calls'), sellers: isChecked('rnp-sellers'), teams: isChecked('rnp-teams') }; }
 async function rnpPreview(){
   if (busy) return;
   const p = rnpParsePasted();
@@ -3195,12 +3218,12 @@ async function rnpApply(){
 function rnpSyncCard(){
   loadRnpBookmark();
   const pv = ui.rnpPreview;
-  const parts = ui.rnpParts || { sales: true, leads: true, calls: true };
+  const parts = Object.assign({ sales: true, leads: true, calls: true, sellers: true, teams: true }, ui.rnpParts || {});
   const s = pv && pv.summary;
-  const nothing = s && !s.add && !s.del && !s.leads && !s.calls;
+  const nothing = s && !s.add && !s.del && !s.leads && !s.calls && !(s.newSellers || []).length && !(s.moves || []).length;
   const perRows = s ? s.perSeller.map(x => `
       <tr><td>${esc(x.name)}${x.erp !== x.name ? ` <span class="muted">(${esc(x.erp)})</span>` : ''}</td>
-        <td class="num">${fmt(x.sheetTotal)}</td><td class="num">${fmt(x.erpTotal)}</td>
+        <td class="num">${fmt(x.sheetTotal)} <span class="muted">· ${fmt(x.sheetCount || 0)}</span></td><td class="num">${fmt(x.erpTotal)} <span class="muted">· ${fmt(x.erpCount || 0)}</span></td>
         <td class="num">${x.add ? '+' + fmt(x.add) : '—'}</td><td class="num">${x.del ? '−' + fmt(x.del) : '—'}</td></tr>`).join('') : '';
   const preview = !s ? '' : `
     <section class="card" aria-label="${esc(t('Preview'))}">
@@ -3215,15 +3238,18 @@ function rnpSyncCard(){
       ${perRows ? `<div class="table-wrap"><table class="table">
         <thead><tr><th>${esc(t('Seller'))}</th><th class="num">${esc(t('Sheet'))}</th><th class="num">RNP</th><th class="num">${esc(t('Add'))}</th><th class="num">${esc(t('Remove'))}</th></tr></thead>
         <tbody>${perRows}</tbody></table></div>` : ''}`}
+      ${(s.newSellers || []).length ? `<p><strong>${esc(t('New sellers to add:'))}</strong> ${esc(s.newSellers.join(', '))}</p>` : ''}
+      ${(s.moves || []).length ? `<p><strong>${esc(t('Team changes:'))}</strong> ${esc(s.moves.join(', '))}</p>` : ''}
       ${s.unmatched.length ? `<p class="hint">${esc(t('In the RNP but not in Sales Pace (skipped): {names}. Add them as sellers, or type their ERP name in the sheet’s Sellers → ErpName column.', { names: s.unmatched.join(', ') }))}</p>` : ''}
-      <p class="hint">${esc(t('{n} sellers matched. Sellers not in the RNP (e.g. C class) are not touched.', { n: s.sellers }))}</p>
-      ${nothing ? '' : `<button type="button" class="btn" onclick="rnpApply()" ${busy ? 'disabled' : ''}>${icon('check')}<span>${esc(t('Apply these changes'))}</span></button>`}
+      <p class="hint">${esc(t('{n} sellers matched. Sellers not in the RNP are not touched.', { n: s.sellers }))}</p>
+      ${s.totals ? `<p class="hint">${esc(t('The ERP month totals (sales count, calls) of {n} sellers are saved too.', { n: s.totals }))}</p>` : ''}
+      ${nothing && !s.totals ? '' : `<button type="button" class="btn" onclick="rnpApply()" ${busy ? 'disabled' : ''}>${icon('check')}<span>${esc(nothing ? t('Save ERP month totals') : t('Apply these changes'))}</span></button>`}
     </section>`;
   const done = ui.rnpDone && !pv ? `<div class="banner" role="status"><span>${esc(t('Last sync: {m} · +{a} sales, −{d} sales, {l} lead days, {c} call-time days.', { m: ui.rnpDone.month, a: ui.rnpDone.add, d: ui.rnpDone.del, l: ui.rnpDone.leads, c: ui.rnpDone.calls }))}</span></div>` : '';
   return `
     <section class="card" aria-label="${esc(t('Sync from RNP'))}">
       ${cardHead('refresh', esc(t('Sync from RNP')))}
-      <p>${esc(t('Makes the sheet match the ERP RNP for one month: sales (by product and payment), leads and call time. You see a preview before anything changes.'))}</p>
+      <p>${esc(t('Makes the sheet match the ERP RNP for one month: sellers and teams, sales (by product and payment), leads, calls and call time. You see a preview before anything changes.'))}</p>
       <ol class="steps">
         <li><strong>${esc(t('Once:'))}</strong> ${DEMO ? esc(t('(not in the demo)')) : rnpBookmarkHref
           ? `${esc(t('drag this button to your bookmarks bar:'))} <a class="btn btn-sm" href="${esc(rnpBookmarkHref)}" onclick="event.preventDefault(); showToast(t('Drag it to the bookmarks bar, then click it on the ERP page.'), 'info')">${icon('bolt')}<span>Copy RNP data</span></a>`
@@ -3237,7 +3263,9 @@ function rnpSyncCard(){
       <div class="button-row rnp-parts">
         <label class="check"><input type="checkbox" id="rnp-sales" ${parts.sales ? 'checked' : ''}> ${esc(t('Sales'))}</label>
         <label class="check"><input type="checkbox" id="rnp-leads" ${parts.leads ? 'checked' : ''}> ${esc(t('Leads'))}</label>
-        <label class="check"><input type="checkbox" id="rnp-calls" ${parts.calls ? 'checked' : ''}> ${esc(t('Call time'))}</label>
+        <label class="check"><input type="checkbox" id="rnp-calls" ${parts.calls ? 'checked' : ''}> ${esc(t('Calls & call time'))}</label>
+        <label class="check"><input type="checkbox" id="rnp-sellers" ${parts.sellers ? 'checked' : ''}> ${esc(t('Add missing sellers'))}</label>
+        <label class="check"><input type="checkbox" id="rnp-teams" ${parts.teams ? 'checked' : ''}> ${esc(t('Update teams'))}</label>
       </div>
       <div class="button-row"><button type="button" class="btn btn-ghost" onclick="rnpPreview()" ${busy ? 'disabled' : ''}>${icon('eye')}<span>${esc(t('Preview'))}</span></button></div>
     </section>

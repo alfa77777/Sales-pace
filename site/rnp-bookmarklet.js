@@ -1,7 +1,7 @@
 /* "Copy RNP data" — runs as a bookmark on any page of the Englify ERP while you
    are logged in. It reads every seller's Sale RNP page for one month (sales by
    product, payments, leads, call time) plus each seller's class from the RNP
-   board, and gives you one block of text to paste into
+   board and each seller's month summary, and gives you one block of text to paste into
    Sales Pace → Settings → Sync from RNP. It only reads; it never changes the ERP.
    Built into a javascript: link by the Settings page (see rnpBookmarkHref in app.js). */
 (function () {
@@ -21,16 +21,20 @@
   var num = function (s) { if (!s || s === '-') return 0; var m = String(s).replace(/UZS/, '').match(/^[\d ]+/); return m ? +m[0].replace(/ /g, '') : 0; };
   var get = function (url) { return fetch(url, { credentials: 'same-origin' }).then(function (r) { return r.text(); }); };
   var parse = function (h) { return new DOMParser().parseFromString(h, 'text/html'); };
-  var ok = function (h) { return /Ishga olingan kun/.test(h) && /Dam olish kuni/.test(h); };
-  var base = '/applicant/sales-manager/sale-rnp';
+  // A seller page is complete when it has the day-by-day table.
+  var ok = function (h) { return /\d\d-(Mon|Tue|Wed|Thu|Fri|Sat|Sun)/.test(h) && /Calls/.test(h); };
+  // Read each seller from the main RNP page (it lists everyone, C class included).
+  var base = '/applicant/sales-manager/rnp';
 
-  Promise.all([get(base + '?date=' + month), get('/applicant/sales-manager/rnp?date=' + month)]).then(function (pages) {
-    var d0 = parse(pages[0]);
+  Promise.all([get('/applicant/sales-manager/sale-rnp?date=' + month), get(base + '?date=' + month)]).then(function (pages) {
+    // Everyone on either board (RNP and Sale RNP).
     var sellers = [], seen = {};
-    [].forEach.call(d0.querySelectorAll('a[href*="created_by"]'), function (a) {
-      var id = new URL(a.href, location.href).searchParams.get('created_by[0]');
-      var name = a.textContent.replace(/\(\d+%\)/, '').replace(/\s+/g, ' ').trim();
-      if (id && name && !seen[id] && /\(\d+%\)/.test(a.textContent)) { seen[id] = 1; sellers.push({ id: id, name: name }); }
+    pages.forEach(function (pg) {
+      [].forEach.call(parse(pg).querySelectorAll('a[href*="created_by"]'), function (a) {
+        var id = new URL(a.getAttribute('href'), location.href).searchParams.get('created_by[0]');
+        var name = a.textContent.replace(/\(\d+%\)/, '').replace(/^\s*[OGABCX] class\s+/, '').replace(/\s+/g, ' ').trim();
+        if (id && name && !seen[id] && /\(\d+%\)/.test(a.textContent)) { seen[id] = 1; sellers.push({ id: id, name: name }); }
+      });
     });
     if (!sellers.length) throw new Error('No sellers found. Are you logged in to the ERP?');
     var cls = {};
@@ -39,12 +43,16 @@
       var x = m.match(/^([OGABCX]) class\s+([^\n(]+?)\s*\(/); if (x) cls[x[2].trim()] = x[1] === 'X' ? '' : x[1];
     });
 
-    var out = {}, done = 0, idx = 0;
+    var out = {}, done = 0, idx = 0, skipped = [];
     var one = function (s) {
       var tries = 0;
       var go = function () {
         return get(base + '?date=' + month + '&created_by[0]=' + s.id).then(function (h) {
-          if (!ok(h)) { if (++tries < 6) return new Promise(function (r) { setTimeout(r, 800); }).then(go); throw new Error('Could not read ' + s.name); }
+          if (!ok(h)) {
+            if (++tries < 6) return new Promise(function (r) { setTimeout(r, 800); }).then(go);
+            // The ERP shows no RNP table for this seller (no data this month): skip, don't abort the whole run.
+            skipped.push(s.name); msg('Read ' + (++done) + ' of ' + sellers.length + ' sellers…'); return;
+          }
           var d = parse(h);
           var R = [].map.call(d.querySelectorAll('tr'), function (tr) { return [].map.call(tr.children, function (c) { return c.textContent.replace(/\s+/g, ' ').trim(); }); });
           var info = function (k) { var r = R.find(function (r) { return r.length === 2 && r[0] === k; }); return r ? r[1] : ''; };
@@ -57,6 +65,7 @@
             var k = r[0], m;
             if (k === 'Jami leadlar soni') r.slice(1).forEach(function (c, i) { var v = num(c); if (v) D(i).lt = v; });
             else if (k === 'Aloqaga chiqilgan leadlar soni') r.slice(1).forEach(function (c, i) { var v = num(c); if (v) D(i).lc = v; });
+            else if (k === 'Calls') r.slice(1).forEach(function (c, i) { var v = num(c); if (v) D(i).calls = v; });
             else if (k === 'Calls Dialog duration') r.slice(1).forEach(function (c, i) {
               var t = c.replace(/Show.*$/, '').replace(/^:\s*/, '').trim().match(/^(\d+):(\d+)$/);
               var v = t ? (+t[1]) * 60 + (+t[2]) : 0; if (v) D(i).min = v; });
@@ -65,8 +74,13 @@
             else if ((m = k.match(/^(.*) soni$/))) r.slice(1).forEach(function (c, i) { var v = num(c); if (v) (D(i).p[m[1]] = D(i).p[m[1]] || [0, 0])[1] = v; });
             else if ((m = k.match(/^(.*) orqali qabul qilingan summa$/))) r.slice(1).forEach(function (c, i) { var v = num(c); if (v) D(i).pay[m[1]] = v; });
           });
-          Object.keys(days).forEach(function (k) { var x = days[k]; if (!Object.keys(x.p).length && !Object.keys(x.pay).length && !x.lt && !x.lc && !x.min) delete days[k]; });
-          out[s.id] = { erp: s.name, team: info('Team'), cls: cls[s.name] || '', days: days };
+          Object.keys(days).forEach(function (k) { var x = days[k]; if (!Object.keys(x.p).length && !Object.keys(x.pay).length && !x.lt && !x.lc && !x.min && !x.calls) delete days[k]; });
+          // The ERP's own month summary. It counts a student who paid on two days (or a number
+          // called on two days) once, so it is smaller than the sum of the day cells.
+          var prod = {};
+          R.forEach(function (r) { var m2; if (r.length === 2 && (m2 = r[0].match(/^Jami (.+) soni$/)) && num(r[1])) prod[m2[1]] = num(r[1]); });
+          var tot = { cnt: num(info('Jami soni')), calls: num(info('Calls')), prod: prod };
+          out[s.id] = { erp: s.name, team: info('Team'), hired: info('Ishga olingan kun') || info('Ishga Olingan kun'), rest: info('Dam olish kuni'), cls: cls[s.name] || '', days: days, tot: tot };
           msg('Read ' + (++done) + ' of ' + sellers.length + ' sellers…');
         });
       };
@@ -75,9 +89,10 @@
     var worker = function () { if (idx >= sellers.length) return Promise.resolve(); var s = sellers[idx++]; return one(s).then(worker); };
     msg('Read 0 of ' + sellers.length + ' sellers…');
     return Promise.all([worker(), worker(), worker()]).then(function () {
-      var data = { kind: 'sales-pace-rnp', v: 1, month: month, at: new Date().toISOString(), sellers: sellers.map(function (s) { return out[s.id]; }) };
+      var data = { kind: 'sales-pace-rnp', v: 1, month: month, at: new Date().toISOString(), sellers: sellers.map(function (s) { return out[s.id]; }).filter(Boolean) };
       var text = JSON.stringify(data);
-      box.innerHTML = '<b>RNP ' + month + ' is ready</b> (' + sellers.length + ' sellers)' +
+      box.innerHTML = '<b>RNP ' + month + ' is ready</b> (' + data.sellers.length + ' sellers)' +
+        (skipped.length ? '<div style="margin-top:4px;opacity:.75">No RNP data in the ERP for: ' + skipped.join(', ') + '</div>' : '') +
         '<div style="margin:8px 0">Click <b>Copy</b>, then in Sales Pace open <b>Settings → Sync from RNP</b> and paste.</div>' +
         '<button id="sp-copy" style="font:inherit;font-weight:600;padding:8px 14px;border:0;border-radius:8px;background:#3b82f6;color:#fff;cursor:pointer">Copy</button> ' +
         '<button id="sp-close" style="font:inherit;padding:8px 14px;border:0;border-radius:8px;background:#374151;color:#fff;cursor:pointer">Close</button>' +

@@ -15,7 +15,7 @@ Sales tracking and payroll dashboard for the Englify sales team. Sellers log dai
 - **RNP report** — sellers by class with pace icons, daily / weekly table by product and payment method, leads and conversion, like the ERP RNP page.
 - **Admin** — manage sellers, plans, bulk sales entry, and open any seller's workspace; deactivate sellers who leave (history and last-month pay kept) or reactivate them.
 - **Team leaders** — a seller marked as leader also sees and manages their own team (sales, leads, call time, RNP, compliance, salaries); plans, pay rules and sellers stay admin-only.
-- **Sync from RNP** — a bookmark copies one month of the ERP RNP; paste it in Settings to preview and apply the differences (sales, leads, call time) in one step.
+- **Sync from RNP** — a bookmark copies one month of the ERP RNP; paste it in Settings to preview and apply the differences (sellers, teams, sales, leads, calls, call time and the ERP's month totals) in one step.
 - **Logins** — per-seller accounts with signed 7-day session tokens.
 
 ## Structure

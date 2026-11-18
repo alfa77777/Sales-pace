@@ -1094,3 +1094,6 @@ ol.steps .btn{ vertical-align: middle; cursor: grab; }
 .welcome-login > .muted{ margin: 0 0 var(--sp-4); }
 .welcome-demo{ grid-column: 1 / -1; }
 @media (max-width: 820px){ .welcome{ grid-template-columns: 1fr; } .welcome-feats{ display: none; } }
+
+/* "ERP" mark on RNP month totals that come from the ERP's own month summary */
+.erp-mark{ display:inline-block; margin-left:4px; padding:0 5px; border-radius:6px; font-size:10px; font-weight:700; letter-spacing:.04em; line-height:16px; vertical-align:1px; background: var(--accent-bg); color: var(--accent-text); }
