@@ -641,11 +641,17 @@ function targetSeller_(body, session) {
 
 /* ---------- audit log ---------- */
 
+// Text that starts with = + - @ would be read by Sheets as a formula ("+12 sales…" → #ERROR!).
+// A leading apostrophe keeps it plain text; Sheets hides it and getValues() doesn't return it.
+function auditText_(v) {
+  const t = String(v == null ? '' : v);
+  return /^[=+\-@]/.test(t) ? "'" + t : t;
+}
 function logAudit_(action, recordType, recordId, oldValue, newValue, actor) {
   try {
     ensureAuditLogSheet_().appendRow([
-      new Date(), action, recordType, String(recordId == null ? '' : recordId),
-      String(oldValue == null ? '' : oldValue), String(newValue == null ? '' : newValue), String(actor || 'unknown'),
+      new Date(), action, recordType, auditText_(recordId),
+      auditText_(oldValue), auditText_(newValue), auditText_(actor || 'unknown'),
     ]);
   } catch (err) {
     // Never let audit logging break the actual operation.
