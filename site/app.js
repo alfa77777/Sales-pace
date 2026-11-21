@@ -458,6 +458,7 @@ const ICONS = {
   refresh: '<path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
   wallet: '<path d="M20 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-4a2 2 0 0 0 0 4h4v4a1 1 0 0 1-1 1H5a2 2 0 0 1-2-2V5"/><path d="M17 14h.01"/>',
   crown: '<path d="M2 18h20"/><path d="m3 7 5 5 4-7 4 7 5-5-2 11H5z"/>',
+  copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
   chevL: '<path d="m15 18-6-6 6-6"/>',
   chevR: '<path d="m9 18 6-6-6-6"/>',
   pie: '<path d="M21.21 15.89A10 10 0 1 1 8 2.83"/><path d="M22 12A10 10 0 0 0 12 2v10z"/>',
@@ -707,6 +708,7 @@ const ROUTES = {
   seller:      { access: 'manager', icon: 'user',     label: 'Seller workspace' },
   compliance:  { access: 'manager', icon: 'check',    label: 'Compliance' },
   rnp:         { access: 'manager', icon: 'table',    label: 'RNP' },
+  race:        { access: 'admin',   icon: 'crown',    label: 'Team race' },
   settings:    { access: 'user',   icon: 'settings', label: 'Settings' },
   login:       { access: 'guest',  icon: 'login',    label: 'Log in' },
 };
@@ -791,7 +793,7 @@ function navItemsFor(){
   if (!session) return [];
   if (isLeader()) return ['dashboard', 'leaderboard', 'mysales', 'myentries', 'standards', 'team', 'entries', 'salaries', 'compliance', 'rnp', 'settings'];
   if (session.role === 'seller') return ['dashboard', 'leaderboard', 'mysales', 'myentries', 'standards', 'settings'];
-  return ['dashboard', 'leaderboard', 'entries', 'team', 'salaries', 'compliance', 'rnp', 'settings'];
+  return ['dashboard', 'leaderboard', 'race', 'entries', 'team', 'salaries', 'compliance', 'rnp', 'settings'];
 }
 function shortLabel(r){
   return t(({ dashboard: 'Home', leaderboard: 'Ranking', mysales: 'My sales', myentries: 'Entries', entries: 'Entries', login: 'Log in' })[r] || ROUTES[r].label);
@@ -1106,6 +1108,7 @@ function renderView(){
     case 'seller':      body = viewWorkspace(); break;
     case 'compliance':  body = viewCompliance(); break;
     case 'rnp':         body = viewRnp(); break;
+    case 'race':        body = viewRace(); break;
     case 'settings':    body = viewSettings(); break;
     default:            body = viewDashboard();
   }
@@ -2625,43 +2628,151 @@ function raceRows(mon){
   rows.sort((a, b) => b.sold - a.sold || b.count - a.count);
   return rows;
 }
+function raceTeams(){ return teamsList().filter(tm => tm.name.trim().toLowerCase() !== 'no team'); }
+// Sales per team per day of the week starting on Monday `mon`: { teamId: [7 sums] }.
+function raceDays(mon){
+  const out = {};
+  raceTeams().forEach(tm => {
+    const sums = [0, 0, 0, 0, 0, 0, 0];
+    teamEntries(tm.id).forEach(e => { const i = daysBetween(mon, e.date); if (i >= 0 && i < 7) sums[i] += e.amount; });
+    out[tm.id] = sums;
+  });
+  return out;
+}
+function daysBetween(a, b){ return Math.round((parseYmd(b) - parseYmd(a)) / 86400000); }
+function raceLabel(w){ return `${shortDay(w)} – ${shortDay(addDaysStr(w, 6))}`; }
+function raceFirstWeek(){
+  const first = data.entries.reduce((m, e) => (!m || e.date < m) ? e.date : m, '');
+  return first ? mondayOf(first) : mondayOf(todayStr());
+}
 function setRaceWeek(mon){ ui.raceWeek = mon; render({ fresh: true }); }
-function renderWeeklyRace(m){
-  if (!isAdmin() || teamsList().length < 2) return '';
-  const weeks = raceWeeks(m);
+function raceStep(n){
+  const thisMon = mondayOf(todayStr());
+  let w = addDaysStr(ui.raceWeek || thisMon, 7 * n);
+  if (w > thisMon) w = thisMon;
+  if (w < raceFirstWeek()) w = raceFirstWeek();
+  setRaceWeek(w);
+}
+// Plain text of the week's standings, to paste into the team chat.
+function raceText(mon){
+  const rows = raceRows(mon);
+  const today = todayStr(), sun = addDaysStr(mon, 6);
+  const running = today >= mon && today <= sun;
+  const medal = ['🥇', '🥈', '🥉'];
+  const lines = [`🏆 ${t('Weekly team race')} · ${raceLabel(mon)}`, ''];
+  rows.forEach((r, i) => lines.push(`${medal[i] || (i + 1) + '.'} ${r.name} — ${fmt(r.sold)} ${t('so‘m')} (${cnt(r.count, '{n} sale', '{n} sales')})`));
+  lines.push('');
+  const top = rows[0] && rows[0].sold > 0 ? rows[0] : null;
+  if (top) lines.push(running
+    ? t('{team} is leading. The week ends on {d}.', { team: top.name, d: shortDay(sun) })
+    : t('{team} wins the weekly bonus!', { team: top.name }));
+  return lines.join('\n');
+}
+async function copyRaceText(){
+  const text = raceText(ui.raceWeek || mondayOf(todayStr()));
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) {
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (e2) {} ta.remove();
+  }
+  showToast(t('Results copied. Paste them in the team chat.'));
+}
+function viewRace(){
+  const teams = raceTeams();
+  if (teams.length < 2) return pageHead(esc(t('Team race')), esc(t('Weekly team race')), '') + `<section class="card"><p class="empty">${esc(t('Add at least two teams to start the race.'))}</p></section>`;
   const today = todayStr();
   const thisMon = mondayOf(today);
-  let mon = weeks.indexOf(ui.raceWeek) !== -1 ? ui.raceWeek : (weeks.indexOf(thisMon) !== -1 ? thisMon : weeks[weeks.length - 1]);
+  const first = raceFirstWeek();
+  let mon = ui.raceWeek && ui.raceWeek <= thisMon && ui.raceWeek >= first ? ui.raceWeek : thisMon;
+  ui.raceWeek = mon;
   const sun = addDaysStr(mon, 6);
+  const running = today >= mon && today <= sun;
   const rows = raceRows(mon);
   const top = rows[0] && rows[0].sold > 0 ? rows[0] : null;
-  const running = today >= mon && today <= sun;
-  const label = (w) => `${shortDay(w)} – ${shortDay(addDaysStr(w, 6))}`;
-  const tabs = `<div class="tab-row race-weeks" role="tablist">${weeks.map(w => `<button type="button" role="tab" class="tab-btn ${w === mon ? 'active' : ''}" aria-selected="${w === mon}" onclick="setRaceWeek('${w}')" ${w > today ? 'disabled' : ''}>${esc(label(w))}</button>`).join('')}</div>`;
-  const body = rows.map((r, i) => `
-    <tr class="${top && r.id === top.id ? 'race-win' : ''}">
-      <td class="num">${i + 1}</td>
-      <td><strong>${esc(r.name)}</strong>${top && r.id === top.id ? ` <span class="pill ok">${icon('crown')}${esc(running ? t('Leading') : t('Winner'))}</span>` : ''}</td>
-      <td class="num"><strong>${fmt(r.sold)}</strong>${top && r.id !== top.id && r.sold ? ` <span class="muted small">−${fmtShort(top.sold - r.sold)}</span>` : ''}</td>
-      <td class="num">${fmt(r.count)}</td>
-      <td class="num">${r.minutes ? fmtHM(r.minutes) : '<span class="muted">—</span>'}</td>
-      <td class="num">${r.leads ? fmt(r.leads) : '<span class="muted">—</span>'}</td>
-    </tr>`).join('');
-  const history = weeks.filter(w => w <= today).map(w => {
+  const second = rows[1];
+  const daysLeft = running ? daysBetween(today, sun) + 1 : 0;
+  const maxSold = Math.max(1, ...rows.map(r => r.sold));
+
+  const nav = `<div class="month-switch race-nav" role="group" aria-label="${esc(t('Week'))}">
+      <button type="button" class="icon-btn" onclick="raceStep(-1)" ${mon <= first ? 'disabled' : ''} aria-label="${esc(t('Previous week'))}">${icon('chevL')}</button>
+      <span class="race-nav-label">${esc(raceLabel(mon))}</span>
+      <button type="button" class="icon-btn" onclick="raceStep(1)" ${mon >= thisMon ? 'disabled' : ''} aria-label="${esc(t('Next week'))}">${icon('chevR')}</button>
+    </div>${mon !== thisMon ? `<button type="button" class="btn btn-ghost" onclick="setRaceWeek('${thisMon}')">${esc(t('This week'))}</button>` : ''}`;
+
+  // headline
+  const lead = top && second && second.sold ? top.sold - second.sold : 0;
+  const hero = top ? `
+    <section class="card race-hero ${running ? '' : 'done'}">
+      <div class="race-hero-icon">${icon('crown')}</div>
+      <div class="race-hero-main">
+        <div class="kicker">${esc(running ? t('Leading this week') : t('Winner of the week'))}</div>
+        <div class="race-hero-team">${esc(top.name)}</div>
+        <div class="race-hero-sub"><strong class="num">${fmt(top.sold)}</strong> ${esc(t('so‘m'))}${lead ? ` · ${esc(t('ahead by {v}', { v: fmtShort(lead) }))}` : ''}</div>
+      </div>
+      <div class="race-hero-side">
+        ${running
+          ? `<div class="race-days num">${daysLeft}</div><div class="muted small">${esc(cnt(daysLeft, 'day left', 'days left'))}</div>`
+          : `<span class="pill ok">${icon('check')}${esc(t('Week finished'))}</span>`}
+      </div>
+    </section>` : `<section class="card"><p class="empty">${esc(t('No sales in this week yet.'))}</p></section>`;
+
+  // bars
+  const bars = rows.map((r, i) => `
+    <div class="race-bar-row ${top && r.id === top.id ? 'win' : ''}">
+      <span class="race-rank num">${i + 1}</span>
+      <span class="race-name">${esc(r.name)}${top && r.id === top.id ? ` ${icon('crown')}` : ''}</span>
+      <span class="race-track"><span style="width:${(r.sold / maxSold * 100).toFixed(1)}%"></span></span>
+      <span class="race-amt num">${fmt(r.sold)}</span>
+      <span class="race-gap num muted small">${top && r.id !== top.id ? '−' + fmtShort(top.sold - r.sold) : ''}</span>
+    </div>`).join('');
+  const standings = `
+    <section class="card race-card">
+      ${cardHead('chart', esc(t('Standings')), `<button type="button" class="btn btn-sm" onclick="copyRaceText()">${icon('copy')}<span>${esc(t('Copy results'))}</span></button>`)}
+      <div class="race-bars">${bars}</div>
+      <div class="table-wrap"><table class="table">
+        <thead><tr><th>${esc(t('Team'))}</th><th class="num">${esc(t('Sales (so‘m)'))}</th><th class="num">${esc(t('Sales count'))}</th><th class="num">${esc(t('Call time'))}</th><th class="num">${esc(t('Leads taken'))}</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td><strong>${esc(r.name)}</strong></td><td class="num">${fmt(r.sold)}</td><td class="num">${fmt(r.count)}</td><td class="num">${r.minutes ? fmtHM(r.minutes) : '<span class="muted">—</span>'}</td><td class="num">${r.leads ? fmt(r.leads) : '<span class="muted">—</span>'}</td></tr>`).join('')}</tbody>
+      </table></div>
+      <p class="hint">${esc(t('Monday–Sunday. All sales of the team’s sellers count, new and extra sellers included. Sellers in “No team” are not in the race.'))}</p>
+    </section>`;
+
+  // day by day
+  const days = raceDays(mon);
+  const dates = [0, 1, 2, 3, 4, 5, 6].map(i => addDaysStr(mon, i));
+  const dayTop = dates.map((d, i) => Math.max(0, ...rows.map(r => days[r.id][i])));
+  const daily = `
+    <section class="card">
+      ${cardHead('calendar', esc(t('Day by day')))}
+      <div class="table-wrap"><table class="table race-daily">
+        <thead><tr><th>${esc(t('Team'))}</th>${dates.map(d => `<th class="num ${d === today ? 'today' : ''}">${esc(weekday(d).slice(0, 3))}<br><span class="muted small">${esc(shortDay(d))}</span></th>`).join('')}<th class="num">${esc(t('Total'))}</th></tr></thead>
+        <tbody>${rows.map(r => `<tr><td><strong>${esc(r.name)}</strong></td>${days[r.id].map((v, i) => `<td class="num ${v && v === dayTop[i] ? 'race-daytop' : ''}">${v ? fmtShort(v) : (dates[i] > today ? '' : '<span class="muted">—</span>')}</td>`).join('')}<td class="num"><strong>${fmtShort(r.sold)}</strong></td></tr>`).join('')}</tbody>
+      </table></div>
+      <p class="hint">${esc(t('Green = the team that sold the most that day.'))}</p>
+    </section>`;
+
+  // winners history
+  const past = [];
+  for (let w = thisMon, i = 0; w >= first && i < 12; w = addDaysStr(w, -7), i++) past.push(w);
+  const wins = {};
+  const histRows = past.map(w => {
     const rr = raceRows(w); const win = rr[0] && rr[0].sold > 0 ? rr[0] : null;
     const live = today >= w && today <= addDaysStr(w, 6);
-    return `<tr><td>${esc(label(w))}${live ? ` <span class="muted small">· ${esc(t('in progress'))}</span>` : ''}</td><td>${win ? `${icon('crown')} <strong>${esc(win.name)}</strong>` : '<span class="muted">—</span>'}</td><td class="num">${win ? fmt(win.sold) : '—'}</td></tr>`;
+    if (win && !live) wins[win.id] = (wins[win.id] || 0) + 1;
+    return `<tr class="${w === mon ? 'selected' : ''}" onclick="setRaceWeek('${w}')" style="cursor:pointer"><td>${esc(raceLabel(w))}${live ? ` <span class="muted small">· ${esc(t('in progress'))}</span>` : ''}</td><td>${win ? `${live ? '' : icon('crown') + ' '}<strong>${esc(win.name)}</strong>` : '<span class="muted">—</span>'}</td><td class="num">${win ? fmt(win.sold) : '—'}</td><td class="num muted">${win && rr[1] ? fmtShort(win.sold - rr[1].sold) : ''}</td></tr>`;
   }).join('');
-  return `
-    <section class="card race-card" aria-label="${esc(t('Weekly team race'))}">
-      ${cardHead('crown', esc(t('Weekly team race')), `<span class="kicker">${esc(t('Monday–Sunday · most money wins the weekly bonus'))}</span>`)}
-      ${tabs}
+  const tally = teams.map(tm => ({ name: tm.name, n: wins[tm.id] || 0 })).sort((a, b) => b.n - a.n)
+    .map(x => `<span class="pill ${x.n ? 'ok' : ''}">${esc(x.name)} · ${esc(cnt(x.n, '{n} win', '{n} wins'))}</span>`).join(' ');
+  const history = `
+    <section class="card">
+      ${cardHead('trophy', esc(t('Past winners')))}
+      <div class="race-tally">${tally}</div>
       <div class="table-wrap"><table class="table">
-        <thead><tr><th class="num">#</th><th>${esc(t('Team'))}</th><th class="num">${esc(t('Sales (so‘m)'))}</th><th class="num">${esc(t('Sales count'))}</th><th class="num">${esc(t('Call time'))}</th><th class="num">${esc(t('Leads taken'))}</th></tr></thead>
-        <tbody>${body}</tbody></table></div>
-      <p class="hint">${esc(running ? t('This week is still running: {d} is the last day.', { d: shortDay(sun) }) : t('Week {w} is finished.', { w: label(mon) }))} ${esc(t('All sales of the team’s sellers count, new and extra sellers included.'))}</p>
-      ${history ? `<details class="race-history"><summary>${esc(t('Winners this month'))}</summary><div class="table-wrap"><table class="table"><thead><tr><th>${esc(t('Week'))}</th><th>${esc(t('Winner'))}</th><th class="num">${esc(t('Sales (so‘m)'))}</th></tr></thead><tbody>${history}</tbody></table></div></details>` : ''}
+        <thead><tr><th>${esc(t('Week'))}</th><th>${esc(t('Winner'))}</th><th class="num">${esc(t('Sales (so‘m)'))}</th><th class="num">${esc(t('Won by'))}</th></tr></thead>
+        <tbody>${histRows}</tbody></table></div>
     </section>`;
+
+  return pageHead(esc(t('Team race')), esc(t('Weekly team race')), esc(t('Monday–Sunday · the team that sells the most money wins the weekly bonus.')), nav)
+    + hero + standings + daily + history;
 }
 // The ERP RNP's own month summary (from Sync from RNP) for these sellers, or null when
 // a seller with sales or calls this month has none yet. The ERP counts a student who
@@ -2763,7 +2874,6 @@ function viewRnp(){
   const bars = (list, label) => list.length ? list.map(x => `<div class="mix-row"><span class="mix-name">${esc(label(x))}</span><span class="mini-track"><span style="width:${Math.max(2, x.v / Math.max(sold, 1) * 100).toFixed(1)}%"></span></span><span class="mix-amt num">${fmtShort(x.v)}${x.n != null ? ` <span class="muted">· ${x.n}</span>` : ''}</span></div>`).join('') : `<p class="empty">${esc(t('Nothing yet this month.'))}</p>`;
   return pageHead(esc(t('RNP')), esc(t('Sales report')), esc(t('Daily sales by product and payment method, leads and calls — like the ERP RNP page.')), monthSwitch())
     + teamTabs() + pastBanner(m)
-    + renderWeeklyRace(m)
     + rnpBoard(m, team)
     + (seller ? rnpSellerCard(seller, m) : '')
     + `<section class="stat-grid" aria-label="${esc(t('Totals'))}">
